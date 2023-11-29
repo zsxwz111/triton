@@ -1,0 +1,14 @@
+name: 8-bit
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.11
+  - pytest
+  - pytorch
+  - torchaudio
+  - torchvision
+  - typer
+  - ca-certificates
+  - certifi
+  - openssl

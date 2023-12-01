@@ -113,7 +113,10 @@ def _path_to_binary(binary: str):
     ]
 
     for p in paths:
-        bin = p.split(" ")[0]
+        if os.name != "nt":
+            bin = p.split(" ")[0]
+        else:
+            bin = p
         if os.path.exists(bin) and os.path.isfile(bin):
             result = subprocess.check_output([bin, "--version"], stderr=subprocess.STDOUT)
             if result is not None:
@@ -152,7 +155,8 @@ def compute_core_version_key():
             contents += [hashlib.sha1(f.read()).hexdigest()]
     # backend
     libtriton_hash = hashlib.sha1()
-    with open(os.path.join(TRITON_PATH, "_C/libtriton.so"), "rb") as f:
+    ext = "so" if os.name != "nt" else "pyd"
+    with open(os.path.join(TRITON_PATH, "_C" + os.sep + "libtriton." + ext), "rb") as f:
         while True:
             chunk = f.read(1024**2)
             if not chunk:

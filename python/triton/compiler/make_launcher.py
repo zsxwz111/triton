@@ -25,7 +25,8 @@ def make_stub(name, signature, constants, ids, **kwargs):
     # name of files that are cached
     so_cache_key = make_so_cache_key(get_cuda_version_key(), signature, constants, ids, **kwargs)
     so_cache_manager = get_cache_manager(so_cache_key)
-    so_name = f"{name}.so"
+
+    so_name = f'{name}.{"so" if os.name != "nt" else "dll"}'
     # retrieve stub from cache if it exists
     cache_path = so_cache_manager.get_file(so_name)
     if cache_path is None:

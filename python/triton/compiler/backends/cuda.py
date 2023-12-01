@@ -8,6 +8,7 @@ from typing import Any
 from ..utils import get_ids_of_tensormaps, parse_tma_info
 from ..make_launcher import make_stub
 import hashlib
+import os
 
 
 def get_kernel_name(src: str, pattern: str) -> str:
@@ -196,6 +197,8 @@ class CUDABackend(BaseBackend):
     def make_cubin(src, metadata, opt, capability):
         metadata["name"] = get_kernel_name(src, pattern='// .globl')
         ptxas, _ = path_to_ptxas()
+        if os.name == 'nt':
+            ptxas = f'"{ptxas}"'
         return compile_ptx_to_cubin(src, ptxas, capability, opt.enable_fp_fusion)
 
     def add_stages(self, stages, compiler_options, linker_options):

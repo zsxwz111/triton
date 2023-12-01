@@ -38,7 +38,7 @@ class CudaUtils(object):
         src = Path(os.path.join(dirname, "backends", "cuda.c")).read_text()
         key = hashlib.md5(src.encode("utf-8")).hexdigest()
         cache = get_cache_manager(key)
-        fname = "cuda_utils.so"
+        fname = "cuda_utils." + ("so" if os.name != "nt" else "dll")
         cache_path = cache.get_file(fname)
         if cache_path is None:
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -51,6 +51,12 @@ class CudaUtils(object):
         import importlib.util
 
         spec = importlib.util.spec_from_file_location("cuda_utils", cache_path)
+        if spec is None:
+            if os.name == "nt":
+                import importlib.machinery
+                loader = importlib.machinery.ExtensionFileLoader("cuda_utils", cache_path)
+                spec = importlib.machinery.ModuleSpec(name="cuda_utils", loader=loader, origin=cache_path)
+        assert spec is not None
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         self.load_binary = mod.load_binary

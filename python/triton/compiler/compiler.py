@@ -15,6 +15,7 @@ from .backends.cuda import CUDABackend
 from dataclasses import dataclass
 from .code_generator import ast_to_ttir
 from pathlib import Path
+import os
 import re
 
 
@@ -216,6 +217,12 @@ class CompiledKernel:
         # initialize launcher
         import importlib.util
         spec = importlib.util.spec_from_file_location("__triton_launcher", so_path)
+        if spec is None:
+            if os.name == "nt":
+                import importlib.machinery
+                loader = importlib.machinery.ExtensionFileLoader("__triton_launcher", so_path)
+                spec = importlib.machinery.ModuleSpec(name="__triton_launcher", loader=loader, origin=so_path)
+        assert spec is not None
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         self.c_wrapper = getattr(mod, "launch")

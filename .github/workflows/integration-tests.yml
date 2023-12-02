@@ -193,6 +193,18 @@ jobs:
             python3 setup.py bdist_wheel
           fi
 
+      - name: Install LLVM (Windows)
+        if: ${{(matrix.runner == 'windows-latest')}}
+        shell: bash
+        run: |
+          curl -L -O https://github.com/wkpark/triton/releases/download/llvm-build-for-win/llvm-5e5a22ca-windows-x64.tar.gz
+          tar xvf llvm-5e5a22ca-windows-x64.tar.gz
+          mv llvm-5e5a22ca-windows-x64 LLVM
+          echo "LLVM_SYSPATH=${{ github.workspace }}\\LLVM" >> "$GITHUB_ENV"
+          # use llvm+mlir libs only.
+          #echo "${{github.workspace }}\\LLVM\\bin" >> "$GITHUB_PATH"
+          rm -f llvm-5e5a22ca-windows-x64.tar.gz
+
       - name: Install Triton (Windows)
         if: ${{(matrix.runner == 'windows-latest')}}
         run: |

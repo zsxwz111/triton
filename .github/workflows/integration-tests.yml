@@ -23,26 +23,53 @@ jobs:
       matrix-required: ${{ steps.set-matrix.outputs.matrix-required }}
       matrix-optional: ${{ steps.set-matrix.outputs.matrix-optional }}
     steps:
-      - name: Prepare runner matrix
+      - name: Prepare matrix
         id: set-matrix
         run: |
           if [ x"${{ github.repository }}" == x"openai/triton" ]; then
-            echo '::set-output name=matrix-required::[["self-hosted", "A100"], ["self-hosted", "H100"]]'
-            echo '::set-output name=matrix-optional::[["self-hosted", "gfx908"], ["self-hosted", "arc770"]]'
+            echo '::set-output name=matrix-required::{"os":["ubuntu-latest"], "self-hosted": ["true"], "runner": ["A100", "H100"], "python-version": ["3.11"], "cuda-version": ["12.1"], "cc":["clang"], "include":[{"os": "ubuntu-latest", "cc": "clang", "cpp": "clang++"}]}'
+            echo '::set-output name=matrix-optional::{"os":["ubuntu-latest"], "self-hosted": ["true"], "runner": ["gfx908", "arc770"], "python-version": ["3.11"], "cuda-version": ["12.1"], "cc":["clang"], "include":[{"os": "ubuntu-latest", "cc": "clang", "cpp": "clang++"}]}'
           else
-            echo '::set-output name=matrix-required::["ubuntu-latest", "windows-latest"]'
-            echo '::set-output name=matrix-optional::["ubuntu-latest", "windows-latest"]'
+            echo '::set-output name=matrix-required::{"os":["ubuntu-latest", "windows-latest"], "self-hosted": ["false"], "python-version": ["3.10", "3.11"], "cuda-version": ["11.8"], "cc":["clang", "cl"], "include":[{"os": "ubuntu-latest", "cc": "clang", "cpp":"clang++"}, {"os": "windows-latest", "cc": "cl", "cpp": "cl"}], "exclude":[{"os": "windows-latest", "cc":"clang"}, {"os":"ubuntu-latest", "cc": "cl"}]}'
+            echo '::set-output name=matrix-optional::{"os":["ubuntu-latest", "windows-latest"], "self-hosted": ["false"], "python-version": ["3.10", "3.11"], "cuda-version": ["11.8"], "cc":["clang", "cl"], "include":[{"os": "ubuntu-latest", "cc": "clang", "cpp":"clang++"}, {"os": "windows-latest", "cc": "cl", "cpp": "cl"}], "exclude":[{"os": "windows-latest", "cc":"clang"}, {"os":"ubuntu-latest", "cc": "cl"}]}'
           fi
+      #matrix:
+      #  os: [ubuntu-latest]
+      #  self-hosted: true
+      #  runner: ["A100", "H100"]
+      #  python-version: ['3.11']
+      #  cuda-version: ['12.1']
+      #  cc: [clang]
+      #  include:
+      #    - os: ubuntu-latest
+      #      cc: clang
+      #      cpp: clang++
+      #matrix:
+      #  os: [ubuntu-latest, windows-latest]
+      #  python-version: ['3.10', '3.11']
+      #  cuda-version: ['11.8', '12.1']
+      #  cc: [clang, cl]
+      #  include:
+      #    - os: windows-latest
+      #      cc: cl
+      #      cpp: cl
+      #    - os: ubuntu-latest
+      #      cc: clang
+      #      cpp: clang++
+      #  exclude:
+      #    - os: windows-latest
+      #      cc: clang
+      #    - os: ubuntu-latest
+      #      cc: cl
 
   Integration-Tests:
     needs: Runner-Preparation
 
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
 
     strategy:
-      matrix:
-        runner: ${{fromJson(needs.Runner-Preparation.outputs.matrix-required)}}
+      matrix: ${{fromJson(needs.Runner-Preparation.outputs.matrix-required)}}
 
     steps:
       - name: Checkout
@@ -50,26 +77,26 @@ jobs:
         with:
           submodules: "true"
       - name: Set CUDA ENV
-        if: ${{(matrix.runner[0] == 'self-hosted') && (matrix.runner[1] == 'V100' || matrix.runner[1] == 'A100' || matrix.runner[1] == 'H100')}}
+        if: ${{(matrix.self-hosted == 'true') && (matrix.runner == 'V100' || matrix.runner == 'A100' || matrix.runner == 'H100')}}
         run: |
           echo "BACKEND=CUDA" >> "${GITHUB_ENV}"
           echo "ENABLE_TMA=0" >> "${GITHUB_ENV}"
           echo "TRITON_DISABLE_LINE_INFO=1" >> "${GITHUB_ENV}"
 
-      - name: Set up Python 3.11
-        if: ${{(matrix.runner[0] != 'self-hosted')}}
+      - name: Set up Python ${{ matrix.python-version }}
+        if: ${{(matrix.self-hosted != 'true')}}
         uses: actions/setup-python@v3
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Set up MSVC
-        if: ${{(matrix.runner == 'windows-latest')}}
+        if: ${{(matrix.os == 'windows-latest')}}
         uses: ilammy/msvc-dev-cmd@v1.4.1
         with:
           arch: amd64
 
-      - name: Setup Mambaforge
-        if: ${{(matrix.runner == 'windows-latest')}}
+      - name: Setup Mambaforge (Windows)
+        if: ${{(matrix.os == 'windows-latest')}}
         uses: conda-incubator/setup-miniconda@v3
         with:
           miniforge-variant: Mambaforge
@@ -78,28 +105,28 @@ jobs:
           use-mamba: true
 
       - uses: conda-incubator/setup-miniconda@v3
-        if: ${{(matrix.runner == 'windows-latest')}}
+        if: ${{(matrix.os == 'windows-latest')}}
         with:
           activate-environment: triton-env
           environment-file: environment.yml
           auto-activate-base: true
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: set LLVM_SYS_PATH (Windows)
-        if: ${{(matrix.runner == 'windows-latest')}}
+        if: ${{(matrix.os == 'windows-latest')}}
         shell: bash
         run: |
           echo "LLVM_SYSPATH=${{ env.CONDA }}/envs/triton-env/Library" >> "$GITHUB_ENV"
           echo "${{ env.CONDA }}/envs/triton-env/Library/bin" >> "$GITHUB_PATH"
 
-      - name: Get Date
-        if: ${{(matrix.runner == 'windows-latest')}}
+      - name: Get Date (Windows)
+        if: ${{(matrix.os == 'windows-latest')}}
         id: get-date
         run: echo "today=$(/bin/date -u '+%Y%m%d')" >> $GITHUB_OUTPUT
         shell: bash
 
-      - name: Cache conda env
-        if: ${{(matrix.runner == 'windows-latest')}}
+      - name: Cache conda env (Windows)
+        if: ${{(matrix.os == 'windows-latest')}}
         id: cache
         uses: actions/cache@v3
         env:
@@ -108,10 +135,11 @@ jobs:
         with:
           path: ${{ env.CONDA }}/envs
           key:
-            ${{ runner.os }}--${{ steps.get-date.outputs.today }}--conda-${{ env.CACHE_NUMBER }}-${{ hashFiles('environment.yml') }}
+            ${{ matrix.os }}--${{ steps.get-date.outputs.today }}--conda-${{ env.CACHE_NUMBER }}-cp${{ matrix.python-version }}-${{ hashFiles('environment.yml') }}
 
-      - name: Update conda environment
-        if: ${{(matrix.runner == 'windows-latest')}}
+
+      - name: Update conda environment (Windows)
+        if: ${{(matrix.os == 'windows-latest')}}
         shell: bash
         run: |
             if [ "${{ steps.cache.outputs.cache-hit }}" != "true" ]; then
@@ -120,7 +148,7 @@ jobs:
             fi
 
       - name: Update environment
-        if: ${{(matrix.runner[0] != 'self-hosted')}}
+        if: ${{(matrix.self-hosted != 'true')}}
         shell: bash
         run: |
           echo "BACKEND=CUDA" >> "${GITHUB_ENV}"
@@ -141,7 +169,7 @@ jobs:
           rm -rf ~/.triton
 
       - name: Update PATH
-        if: ${{(matrix.runner[0] == 'self-hosted')}}
+        if: ${{(matrix.self-hosted == 'true')}}
         run: |
           echo "PATH=${HOME}/.local/bin:${PATH}" >> "${GITHUB_ENV}"
 
@@ -151,7 +179,7 @@ jobs:
           python3 -m pre_commit run --all-files --verbose
 
       - name: Install Triton
-        if: ${{(matrix.runner != 'windows-latest')}}
+        if: ${{(matrix.os != 'windows-latest')}}
         run: |
           cd python
           python3 -m pip install --upgrade pip
@@ -159,12 +187,12 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y ccache clang lld
           TRITON_BUILD_WITH_CLANG_LLD=true TRITON_BUILD_WITH_CCACHE=true python3 -m pip install --no-build-isolation -vvv '.[tests]'
-          if [ "${{ matrix.runner }}" = 'ubuntu-latest' ]; then
+          if [ "${{ matrix.os }}" = 'ubuntu-latest' ]; then
             python3 setup.py bdist_wheel
           fi
 
       - name: Install LLVM (Windows)
-        if: ${{(matrix.runner == 'windows-latest')}}
+        if: ${{(matrix.os == 'windows-latest')}}
         shell: bash
         run: |
           curl -L -O https://github.com/wkpark/triton/releases/download/llvm-build-for-win/llvm-5e5a22ca-windows-x64.tar.gz
@@ -176,7 +204,7 @@ jobs:
           rm -f llvm-5e5a22ca-windows-x64.tar.gz
 
       - name: Install Triton (Windows)
-        if: ${{(matrix.runner == 'windows-latest')}}
+        if: ${{(matrix.os == 'windows-latest')}}
         run: |
           cd python
           python3 -m pip install --upgrade pip
@@ -185,7 +213,7 @@ jobs:
           python3 setup.py bdist_wheel
 
       - name: Run lit tests
-        if: ${{(matrix.runner[0] == 'self-hosted') && env.BACKEND == 'CUDA'}}
+        if: ${{(matrix.self-hosted == 'true') && env.BACKEND == 'CUDA'}}
         run: |
           python3 -m pip install lit
           cd python
@@ -196,12 +224,12 @@ jobs:
           lit -v "${LIT_TEST_DIR}"
 
       - name: Enable TMA
-        if: ${{(matrix.runner[0] == 'self-hosted') && (matrix.runner[1] == 'H100')}}
+        if: ${{(matrix.self-hosted == 'true') && (matrix.runner == 'H100')}}
         run: |
           echo "ENABLE_TMA=1" >> "${GITHUB_ENV}"
 
       - name: Run python tests on CUDA with ENABLE_TMA=1
-        if: ${{(matrix.runner[0] == 'self-hosted') && env.BACKEND == 'CUDA' && env.ENABLE_TMA == '1'}}
+        if: ${{(matrix.self-hosted == 'true') && env.BACKEND == 'CUDA' && env.ENABLE_TMA == '1'}}
         run: |
           cd python/test/unit
           python3 -m pytest -n 8 --ignore=runtime --ignore=operators --ignore=language/test_line_info.py --ignore=language/test_subprocess.py
@@ -214,7 +242,7 @@ jobs:
           python3 -m pytest hopper/test_flashattention.py
 
       - name: Run python tests on CUDA with ENABLE_TMA=0
-        if: ${{(matrix.runner[0] == 'self-hosted') && env.BACKEND == 'CUDA' && env.ENABLE_TMA == '0'}}
+        if: ${{(matrix.self-hosted == 'true') && env.BACKEND == 'CUDA' && env.ENABLE_TMA == '0'}}
         run: |
           cd python/test/unit
           python3 -m pytest -n 8 --ignore=runtime --ignore=hopper --ignore=operators --ignore=language/test_line_info.py
@@ -229,7 +257,7 @@ jobs:
           rm -rf ~/.triton
 
       - name: Run interpreter tests
-        if: ${{(matrix.runner[0] == 'self-hosted')}}
+        if: ${{(matrix.self-hosted == 'true')}}
         env:
           # TRITON_INTERPRET: "1"
           CUA_VISIBLE_DEVICES: ""
@@ -238,19 +266,19 @@ jobs:
           python3 -m pytest -vs operators/test_flash_attention.py
 
       - name: Run partial tests on CUDA with ENABLE_TMA=1
-        if: ${{(matrix.runner[0] == 'self-hosted') && env.BACKEND == 'CUDA' && env.ENABLE_TMA == '1'}}
+        if: ${{(matrix.self-hosted == 'true') && env.BACKEND == 'CUDA' && env.ENABLE_TMA == '1'}}
         run: |
           cd python/test/unit
           python3 -m pytest -n 8 operators
 
       - name: Run partial tests on CUDA with ENABLE_TMA=0
-        if: ${{(matrix.runner[0] == 'self-hosted') && env.BACKEND == 'CUDA' && env.ENABLE_TMA == '0'}}
+        if: ${{(matrix.self-hosted == 'true') && env.BACKEND == 'CUDA' && env.ENABLE_TMA == '0'}}
         run: |
           cd python/test/unit
           python3 -m pytest -n 8 operators
 
       - name: Upload Build artifacts (Windows)
-        if: ${{(matrix.runner == 'windows-latest')}}
+        if: ${{(matrix.os == 'windows-latest')}}
         uses: actions/upload-artifact@v2
         with:
           name: triton-dist-windows
@@ -258,7 +286,7 @@ jobs:
             ${{ github.workspace }}/python/dist/
 
       - name: Upload Build artifacts (Ubuntu)
-        if: ${{(matrix.runner == 'ubuntu-latest')}}
+        if: ${{(matrix.os == 'ubuntu-latest')}}
         uses: actions/upload-artifact@v2
         with:
           name: triton-dist-ubuntu
@@ -266,27 +294,27 @@ jobs:
             ${{ github.workspace }}/python/dist/
 
       - name: Create artifacts archive
-        if: ${{(matrix.runner[0] == 'self-hosted') && (matrix.runner[1] == 'V100' || matrix.runner[1] == 'A100' || matrix.runner[1] == 'H100')}}
+        if: ${{(matrix.self-hosted == 'true') && (matrix.runner == 'V100' || matrix.runner == 'A100' || matrix.runner == 'H100')}}
         run: |
           cd ~/.triton
           tar -czf artifacts.tar.gz cache
 
       - name: Upload artifacts archive
-        if: ${{(matrix.runner[0] == 'self-hosted') && (matrix.runner[1] == 'V100' || matrix.runner[1] == 'A100' || matrix.runner[1] == 'H100')}}
+        if: ${{(matrix.self-hosted == 'true') && (matrix.runner == 'V100' || matrix.runner == 'A100' || matrix.runner == 'H100')}}
         uses: actions/upload-artifact@v2
         with:
-          name: artifacts ${{ matrix.runner[1] }}
+          name: artifacts ${{ matrix.runner }}
           path: ~/.triton/artifacts.tar.gz
 
       - name: Run CXX unittests
-        if: ${{(matrix.runner[0] == 'self-hosted') && env.BACKEND == 'CUDA'}}
+        if: ${{(matrix.self-hosted == 'true') && env.BACKEND == 'CUDA'}}
         run: |
           cd python
           cd "build/$(ls build | grep -i cmake)"
           ctest
 
       - name: Regression tests
-        if: ${{ contains(matrix.runner, 'A100') }}
+        if: ${{ (matrix.self-hosted == 'true') && contains(matrix.runner, 'A100') }}
         run: |
           python3 -m pip install pytest-rerunfailures
           cd python/test/regression

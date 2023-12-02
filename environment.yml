@@ -16,5 +16,3 @@ dependencies:
   - zstd
   - llvm>=17.0
   - mlir>=17.0
-  - clang
-  - clangxx

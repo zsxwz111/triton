@@ -106,6 +106,7 @@ def get_backend(device_type: str):
 
 
 def _path_to_binary(binary: str):
+    binary += ".exe" if os.name == "nt" else ""
     base_dir = os.path.join(os.path.dirname(__file__), os.pardir)
     paths = [
         os.environ.get(f"TRITON_{binary.upper()}_PATH", ""),

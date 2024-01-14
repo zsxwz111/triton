@@ -387,7 +387,10 @@ if platform.system() in ["Linux", "Windows"]:
         url_func=lambda system, arch, version:
         f"https://anaconda.org/nvidia/cuda-nvdisasm/{version}/download/{system}-{arch}/cuda-nvdisasm-{version}-0.tar.bz2",
     )
-backends = _copy_backends(["nvidia", "amd"])
+backends = ["nvidia", "amd"]
+if os.name == "nt":
+    backends = ["nvidia"]
+backends = _copy_backends(backends)
 
 package_data = dict()
 package_data["triton/tools"] = ["compile.h", "compile.c"]

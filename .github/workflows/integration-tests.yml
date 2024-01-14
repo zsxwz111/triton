@@ -87,9 +87,16 @@ jobs:
         if: matrix.runner == 'windows-latest'
         shell: bash -el {0}
         run: |
-          LLVM_SHORTHASH="$(cat cmake/llvm-hash.txt | cut -c1-8)"
+          ver=c2301380
+          curl -L -O https://github.com/wkpark/triton/releases/download/llvm-$ver-windows/llvm-c2301380-windows-x64.tar.gz
+          tar xvf llvm-$ver-windows-x64.tar.gz
+          mv llvm-$ver-windows-x64 LLVM
+          echo "LLVM_SYSPATH=${{ github.workspace }}\\LLVM" >> "$GITHUB_ENV"
+          rm -f llvm-$ver-windows-x64.tar.gz
+
+          ### LLVM_SHORTHASH="$(cat cmake/llvm-hash.txt | cut -c1-8)"
           # prepare LLVM prebuilt path. will be downloaded and extracted by setup.py step
-          echo "~/.triton/llvm/llvm-$LLVM_SHORTHASH-windows-x64/bin" >> "$GITHUB_PATH"
+          ### echo "~/.triton/llvm/llvm-$LLVM_SHORTHASH-windows-x64/bin" >> "$GITHUB_PATH"
           #echo "LLVM_SYSPATH=~/.triton/llvm/llvm-$LLVM_SHORTHASH-windows-x64" >> "$GITHUB_ENV"
           # compile with a selected matrix.cc
           if [ "${{matrix.cc}}" = "cl" ]; then

@@ -1,5 +1,6 @@
 import os
 import hashlib
+import sysconfig
 import tempfile
 from pathlib import Path
 from triton.runtime.build import _build
@@ -10,6 +11,12 @@ dirname = os.path.dirname(os.path.realpath(__file__))
 include_dir = [os.path.join(dirname, "include")]
 library_dir = [os.path.join(dirname, "lib")]
 libraries = ['cuda']
+
+if os.name == "nt":
+    installed_base = sysconfig.get_config_var('installed_base')
+    library_dir += [os.getenv("PYTHON_LIB_DIRS", os.path.join(installed_base, "libs"))]
+    library_dir += [os.path.join(os.environ.get("CUDA_PATH"), "lib", "x64")]
+    include_dir += [os.path.join(os.environ.get("CUDA_PATH"), "include")]
 
 
 def compile_module_from_src(src, name):

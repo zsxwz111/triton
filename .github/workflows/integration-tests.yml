@@ -92,8 +92,10 @@ jobs:
         run: |
           ver=4017f04e
           curl -L -O https://github.com/wkpark/triton/releases/download/llvm-$ver-windows/llvm-$ver-windows-x64.tar.gz
+          curl -L -O https://github.com/wkpark/triton/releases/download/llvm-$ver-windows/llvm-fix.patch
           tar xvf llvm-$ver-windows-x64.tar.gz
           mv llvm-$ver-windows-x64 LLVM
+          patch -p0 < llvm-fix.patch
           echo "LLVM_SYSPATH=${{ github.workspace }}\\LLVM" >> "$GITHUB_ENV"
           rm -f llvm-$ver-windows-x64.tar.gz
 

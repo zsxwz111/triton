@@ -225,7 +225,7 @@ jobs:
         if: matrix.runner[0] != 'self-hosted'
         uses: actions/upload-artifact@v3
         with:
-          name: triton-dist ${{ matrix.runner }}
+          name: triton-dist ${{ matrix.runner }} python-${{ matrix.python-version }} cuda-${{ matrix.cuda-version }}
           path: |
             ${{ github.workspace }}/python/dist/
 

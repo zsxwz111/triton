@@ -16,12 +16,15 @@ from pathlib import Path
 
 @functools.lru_cache()
 def _path_to_binary(binary: str):
+    binary += ".exe" if os.name == "nt" else ""
     paths = [
         os.environ.get(f"TRITON_{binary.upper()}_PATH", ""),
         os.path.join(os.path.dirname(__file__), "bin", binary),
     ]
 
     for bin in paths:
+        if os.name != "nt":
+            bin = bin.split(" ")[0]
         if os.path.exists(bin) and os.path.isfile(bin):
             result = subprocess.check_output([bin, "--version"], stderr=subprocess.STDOUT)
             if result is not None:

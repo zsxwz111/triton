@@ -1635,6 +1635,7 @@ AMDWmmaEncodingAttr::getShapePerCTATileForDotOperands(ArrayRef<int64_t> shape,
     return {static_cast<unsigned>(shape[0]), parentShapePerCTA[1]};
   } else {
     llvm::report_fatal_error("DotOperandEncodingAttr opIdx must be 0 or 1");
+    return {};
   }
 }
 

@@ -29,6 +29,9 @@ jobs:
     outputs:
       matrix-CUDA: ${{ steps.set-matrix.outputs.matrix-CUDA }}
       matrix-HIP: ${{ steps.set-matrix.outputs.matrix-HIP }}
+      python-version: ${{ steps.set-matrix.outputs.python-version }}
+      cuda-version: ${{ steps.set-matrix.outputs.cuda-version }}
+      cc: ${{ steps.set-matrix.outputs.cc }}
     steps:
       - name: Decide pre-submit integration test enablement
         # Always enable integration tests for pre-submit pull requests.
@@ -66,9 +69,12 @@ jobs:
             echo '::set-output name=matrix-CUDA::[["self-hosted", "A100"], ["self-hosted", "H100"]]'
             echo '::set-output name=matrix-HIP::[["self-hosted", "gfx90a"]]'
           else
-            echo '::set-output name=matrix-CUDA::["ubuntu-latest"]'
-            echo '::set-output name=matrix-HIP::["ubuntu-latest"]'
+            echo '::set-output name=matrix-CUDA::["ubuntu-latest", "windows-latest"]'
+            echo '::set-output name=matrix-HIP::["ubuntu-latest", "windows-latest"]'
           fi
+          echo '::set-output name=python-version::["3.8", "3.9", "3.10", "3.11", "3.12"]'
+          echo '::set-output name=cuda-version::["11.8.89", "12.1.1"]'
+          echo '::set-output name=cc::["clang"]'
 
   pre-commit:
     name: pre-commit (code formatting)
@@ -113,11 +119,14 @@ jobs:
     needs: Runner-Preparation
 
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     strategy:
       matrix:
         runner: ${{fromJson(needs.Runner-Preparation.outputs.matrix-CUDA)}}
+        python-version: ${{fromJson(needs.Runner-Preparation.outputs.python-version)}}
+        cuda-version: ${{fromJson(needs.Runner-Preparation.outputs.cuda-version)}}
+        cc: ${{fromJson(needs.Runner-Preparation.outputs.cc)}}
 
     steps:
       - name: Checkout
@@ -133,6 +142,87 @@ jobs:
           echo "nvidia=$(cat cmake/nvidia-toolchain-version.txt)" >> $GITHUB_OUTPUT
         shell: bash
 
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v3
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up MSVC
+        if: matrix.runner == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1.12.1
+        with:
+          arch: amd64
+
+      - name: Setup Micromamba
+        uses: mamba-org/setup-micromamba@v1
+        if: matrix.runner[0] != 'self-hosted'
+        with:
+          environment-name: triton-env
+          init-shell: bash
+          create-args: >-
+            typer
+            ca-certificates
+            certifi
+            openssl
+            zlib
+            zstd
+            llvm>=17.0
+          condarc: |
+            channels:
+              - nvidia/label/cuda-${{ matrix.cuda-version }}
+              - conda-forge
+              - pytorch
+            channel_priority: strict
+
+      - name: set Environment Variables (Windows)
+        if: matrix.runner == 'windows-latest'
+        shell: bash -el {0}
+        run: |
+          ver=4017f04e
+          curl -L -O https://github.com/wkpark/triton/releases/download/llvm-$ver-windows/llvm-$ver-windows-x64.tar.gz
+          curl -L -O https://github.com/wkpark/triton/releases/download/llvm-$ver-windows/llvm-fix.patch
+          tar xvf llvm-$ver-windows-x64.tar.gz
+          mv llvm-$ver-windows-x64 LLVM
+          patch -p0 < llvm-fix.patch
+          echo "LLVM_SYSPATH=${{ github.workspace }}\\LLVM" >> "$GITHUB_ENV"
+          rm -f llvm-$ver-windows-x64.tar.gz
+
+          ### LLVM_SHORTHASH="$(cat cmake/llvm-hash.txt | cut -c1-8)"
+          # prepare LLVM prebuilt path. will be downloaded and extracted by setup.py step
+          ### echo "~/.triton/llvm/llvm-$LLVM_SHORTHASH-windows-x64/bin" >> "$GITHUB_PATH"
+          #echo "LLVM_SYSPATH=~/.triton/llvm/llvm-$LLVM_SHORTHASH-windows-x64" >> "$GITHUB_ENV"
+          # compile with a selected matrix.cc
+          if [ "${{matrix.cc}}" = "cl" ]; then
+            echo "CC=cl" >> "${GITHUB_ENV}"
+            echo "CXX=cl" >> "${GITHUB_ENV}"
+          elif [ "${{matrix.cc}}" = "clang" ]; then
+            echo "CC=clang" >> "${GITHUB_ENV}"
+            echo "CXX=clang++" >> "${GITHUB_ENV}"
+          fi
+
+      - name: CUDA Setup ${{ matrix.cuda-version }}
+        if: matrix.runner[0] != 'self-hosted'
+        shell: bash -el {0}
+        run: |
+          CUDA_HOME="${{ env.MAMBA_ROOT_PREFIX }}/envs/triton-env"
+          echo CUDA_HOME=$CUDA_HOME >> "$GITHUB_ENV"
+          echo CUDA_PATH=$CUDA_HOME >> "$GITHUB_ENV"
+
+      - name: Update environment
+        if: matrix.runner[0] != 'self-hosted'
+        shell: bash
+        run: |
+          echo "BACKEND=CUDA" >> "${GITHUB_ENV}"
+          echo "ENABLE_TMA=0" >> "${GITHUB_ENV}"
+          echo "TRITON_DISABLE_LINE_INFO=1" >> "${GITHUB_ENV}"
+
+      - name: Set reusable strings
+        # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
+        id: strings
+        shell: bash
+        run: |
+          echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+
       - name: Cache build dependency
         uses: actions/cache@v4
         with:
@@ -145,31 +235,49 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-llvm-${{ steps.cache-key.outputs.llvm }}-nvidia-${{ steps.cache-key.outputs.nvidia }}-pybind11-${{ steps.cache-key.outputs.pybind11 }}
 
       - name: Inspect cache directory
+        shell: bash
         run: |
           mkdir -p ~/.triton
           ls -alh ~/.triton
 
       - name: Update PATH
+        if: matrix.runner[0] == 'self-hosted'
         run: |
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Install apt dependencies
+        if: matrix.runner != 'windows-latest'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y ccache clang lld
 
       - name: Install pip dependencies
+        if: matrix.runner != 'windows-latest'
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install wheel cmake==3.24 ninja pytest-xdist lit
+          python3 -m pip install wheel cmake==3.24 ninja pytest-xdist lit wheel
 
       - name: Install Triton
+        if: matrix.runner != 'windows-latest'
         run: |
           echo "PATH is '$PATH'"
           cd python
-          TRITON_BUILD_WITH_CCACHE=true python3 -m pip install --no-build-isolation -vvv '.[tests]'
+          TRITON_BUILD_WITH_CLANG_LLD=true TRITON_BUILD_WITH_CCACHE=true python3 -m pip install --no-build-isolation -vvv '.[tests]'
+          if [ "${{ matrix.runner }}" = 'ubuntu-latest' ]; then
+            python3 setup.py bdist_wheel
+          fi
+
+      - name: Install Triton (Windows)
+        if: matrix.runner == 'windows-latest'
+        run: |
+          cd python
+          python -m pip install --upgrade pip
+          python -m pip install cmake==3.24 ninja pytest-xdist wheel
+          python -m pip install --no-build-isolation -vvv .
+          python setup.py bdist_wheel
 
       - name: Run lit tests
+        if: ${{matrix.runner[0] == 'self-hosted' && env.BACKEND == 'CUDA'}}
         run: |
           cd python
           LIT_TEST_DIR="build/$(ls build | grep -i cmake)/test"
@@ -179,6 +287,7 @@ jobs:
           lit -v "${LIT_TEST_DIR}"
 
       - name: Run python tests on CUDA
+        if: ${{matrix.runner[0] == 'self-hosted' && env.BACKEND == 'CUDA'}}
         run: |
           cd python/test/unit
           python3 -m pytest -vvv -n 8 --ignore=hopper/test_flashattention.py --ignore=runtime --ignore=language/test_line_info.py --ignore=language/test_subprocess.py
@@ -201,19 +310,29 @@ jobs:
            --device cpu
 
       - name: Run C++ unittests
+        if: matrix.runner[0] == 'self-hosted'
         run: |
           cd python
           cd "build/$(ls build | grep -i cmake)"
           ctest
 
       - name: Inspect cache directory
+        shell: bash
         run: |
           mkdir -p ~/.triton
           ls -alh ~/.triton
           du -sh ~/.triton/**
-
+      
+      - name: Upload Build artifacts
+        if: matrix.runner[0] != 'self-hosted'
+        uses: actions/upload-artifact@v3
+        with:
+          name: triton-dist ${{ matrix.runner }} python-${{ matrix.python-version }} cuda-${{ matrix.cuda-version }}
+          path: |
+            ${{ github.workspace }}/python/dist/
 
   Integration-Tests-AMD:
+    if: github.repository == 'openai/triton'
     needs: Runner-Preparation
 
     runs-on: ${{ matrix.runner }}

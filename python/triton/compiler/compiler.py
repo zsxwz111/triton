@@ -157,8 +157,9 @@ def triton_key():
         with open(lib.module_finder.find_spec(lib.name).origin, "rb") as f:
             contents += [hashlib.sha256(f.read()).hexdigest()]
     # backend
-    libtriton_hash = hashlib.sha256()
-    with open(os.path.join(TRITON_PATH, "_C/libtriton.so"), "rb") as f:
+    libtriton_hash = hashlib.sha1()
+    ext = "so" if os.name != "nt" else "pyd"
+    with open(os.path.join(TRITON_PATH, "_C", "libtriton." + ext), "rb") as f:
         while True:
             chunk = f.read(1024**2)
             if not chunk:

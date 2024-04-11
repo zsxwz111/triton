@@ -31,7 +31,7 @@ public:
     ModuleOp mod = getOperation();
     mod.walk([&](triton::gpu::ConvertLayoutOp cvtOp) -> void {
       OpBuilder builder(cvtOp);
-      auto srcType = cvtOp.getOperand().getType().cast<RankedTensorType>();
+      auto srcType = cvtOp.getSrc().getType().cast<RankedTensorType>();
       auto dstType = cvtOp.getType().cast<RankedTensorType>();
       auto srcEncoding = srcType.getEncoding();
       if (srcEncoding.isa<triton::gpu::SharedEncodingAttr>())
@@ -48,6 +48,14 @@ public:
              dstDotOp.getParent() == srcMmaEncoding))
           return;
       }
+      if (auto srcMfmaEncoding =
+              srcEncoding.dyn_cast<triton::gpu::AMDMfmaEncodingAttr>()) {
+
+        if (srcMfmaEncoding.getWarpsPerCTA()[1] == 1 &&
+            srcMfmaEncoding.getIsTransposed() &&
+            dstDotOp.getParent() == srcMfmaEncoding)
+          return;
+      }
       auto srcOrder = triton::gpu::getOrder(srcEncoding);
       auto rank = srcOrder.size();
       SmallVector<unsigned> sharedOrder;
@@ -60,16 +68,16 @@ public:
       } else {
         sharedOrder = srcOrder;
       }
-      auto tmpType = RankedTensorType::get(
+      auto tmpType = triton::MemDescType::get(
           dstType.getShape(), dstType.getElementType(),
           triton::gpu::SharedEncodingAttr::get(
               mod.getContext(), dstDotOp, srcType.getShape(), sharedOrder,
               triton::gpu::getCTALayout(srcEncoding),
               srcType.getElementType()));
-      auto tmp = builder.create<triton::gpu::ConvertLayoutOp>(
-          cvtOp.getLoc(), tmpType, cvtOp.getOperand());
-      auto newConvert = builder.create<triton::gpu::ConvertLayoutOp>(
-          cvtOp.getLoc(), dstType, tmp);
+      auto tmp = builder.create<triton::gpu::LocalAllocOp>(
+          cvtOp.getLoc(), tmpType, cvtOp.getSrc());
+      auto newConvert = builder.create<triton::gpu::LocalLoadOp>(cvtOp.getLoc(),
+                                                                 dstType, tmp);
       cvtOp.replaceAllUsesWith(newConvert.getResult());
       cvtOp.erase();
     });

@@ -40,6 +40,9 @@ inline const std::set<std::string> ENV_VARS = {
     "MLIR_ENABLE_DUMP",
     "TRITON_DISABLE_LINE_INFO",
     "TRITON_DISABLE_RESHAPE_ENCODING_INFERENCE",
+    "MLIR_ENABLE_DIAGNOSTICS",
+    "TRITON_ENABLE_LLVM_DEBUG",
+    "USE_TTGIR_LOC",
 };
 
 namespace tools {

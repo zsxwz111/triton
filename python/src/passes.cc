@@ -51,15 +51,13 @@ void init_triton_passes_ttgpuir(py::module &&m) {
   ADD_PASS_WRAPPER_0("add_prefetch", createPrefetchPass);
   ADD_PASS_WRAPPER_1("add_accelerate_matmul", createAccelerateMatmulPass, int);
   ADD_PASS_WRAPPER_0("add_reorder_instructions", createReorderInstructionsPass);
+  ADD_PASS_WRAPPER_0("add_f32_dot_tc", createF32DotTCPass);
   ADD_PASS_WRAPPER_0("add_optimize_dot_operands",
                      createOptimizeDotOperandsPass);
   ADD_PASS_WRAPPER_0("add_remove_layout_conversions",
                      createRemoveLayoutConversionsPass);
   ADD_PASS_WRAPPER_0("add_reduce_data_duplication",
                      createReduceDataDuplicationPass);
-  // pre-process for conversion to LLVM
-  ADD_PASS_WRAPPER_0("add_decompose_unsupported_conversions",
-                     createDecomposeUnsupportedConversionsPass);
   ADD_PASS_WRAPPER_0("add_allocate_shared_memory",
                      createAllocateSharedMemoryPass);
 }

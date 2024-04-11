@@ -9,8 +9,8 @@ def TritonGPUPipeline : Pass<"tritongpu-pipeline", "mlir::ModuleOp"> {
   let summary = "pipeline";
 
   let description = [{
-    Replace `LoadOp` in loops by `InsertSliceAsyncOp` instructions that asynchronously construct the data
-    needed at the next iteration
+    Applies software pipelining to loops in the module based on number of stages.
+    This may convert some load into asynchronous loads, and multi-buffer the data.
   }];
 
   let constructor = "mlir::triton::gpu::createPipelinePass()";
@@ -34,6 +34,20 @@ def TritonGPUPipeline : Pass<"tritongpu-pipeline", "mlir::ModuleOp"> {
            "int32_t", /*default*/"80",
            "device compute capability">
   ];
+}
+
+def TritonGPUF32DotTC : Pass<"tritongpu-F32DotTC", "mlir::ModuleOp"> {
+  let summary = "3xTF32 trick";
+
+  let description = [{
+    Decompose fp32 `DotOp` instructions into 4 pointwise ops and 3 fp16 `DotOp`s
+    to allow using TensorCores. See https://github.com/NVIDIA/cutlass/discussions/385
+  }];
+
+  let constructor = "mlir::triton::gpu::createF32DotTCPass()";
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect"];
 }
 
 def TritonGPUPrefetch : Pass<"tritongpu-prefetch", "mlir::ModuleOp"> {
@@ -107,19 +121,6 @@ def TritonGPURemoveLayoutConversions : Pass<"tritongpu-remove-layout-conversions
   }];
 
   let constructor = "mlir::triton::gpu::createRemoveLayoutConversionsPass()";
-
-  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
-                           "mlir::triton::TritonDialect"];
-
-}
-
-def TritonGPUOptimizeEpilogue : Pass<"tritongpu-optimize-epilogue", "mlir::ModuleOp"> {
-  let summary = "Optimize epilogue: (1) Store accumulators directly without going thorough SMEM in epilogue.";
-
-  let description = [{
-  }];
-
-  let constructor = "mlir::triton::gpu::createOptimizeEpiloguePass()";
 
   let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
                            "mlir::triton::TritonDialect"];

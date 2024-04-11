@@ -43,14 +43,11 @@ repos:
     hooks:
       - id: clang-format
         stages: [commit, push, manual]
-        exclude: |
-          (?x)(
-            ^include/triton/external/|
-            ^third_party/
-          )
 
 exclude: |
   (?x)(
     ^include/triton/external/|
-    ^third_party/
+    ^third_party/amd/backend/include/hip/|
+    ^third_party/amd/backend/lib/|
+    ^third_party/nvidia/backend/include/cuda.h
   )

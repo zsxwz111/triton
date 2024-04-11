@@ -29,34 +29,59 @@ class Backend:
     src_dir: str
     backend_dir: str
     install_dir: str
+    is_external: bool
 
 
-def _copy_backends(active):
-    ret = []
-    root_dir = os.path.join(os.pardir, "third_party")
-    for backend in active:
-        curr_path = os.path.join(root_dir, backend)
-        backend_path = os.path.abspath(os.path.join(curr_path, "backend"))
-        install_dir = os.path.join(os.path.dirname(__file__), "triton", "backends", backend)
-        # initialize submodule if there is one
-        try:
-            subprocess.run(["git", "submodule", "update", "--init", f"{backend}"], check=True,
-                           stdout=subprocess.DEVNULL, cwd=root_dir)
-        except subprocess.CalledProcessError:
-            pass
-        except FileNotFoundError:
-            pass
-        # check conditions
-        assert backend in os.listdir(root_dir), f"{backend} is requested for install but not present in {root_dir}"
+class BackendInstaller:
+
+    @staticmethod
+    def prepare(backend_name: str, backend_src_dir: str = None, is_external: bool = False):
+        # Initialize submodule if there is one for in-tree backends.
+        if not is_external:
+            root_dir = os.path.join(os.pardir, "third_party")
+            assert backend_name in os.listdir(
+                root_dir), f"{backend_name} is requested for install but not present in {root_dir}"
+
+            try:
+                subprocess.run(["git", "submodule", "update", "--init", f"{backend_name}"], check=True,
+                               stdout=subprocess.DEVNULL, cwd=root_dir)
+            except subprocess.CalledProcessError:
+                pass
+            except FileNotFoundError:
+                pass
+
+            backend_src_dir = os.path.join(root_dir, backend_name)
+
+        backend_path = os.path.abspath(os.path.join(backend_src_dir, "backend"))
         assert os.path.exists(backend_path), f"{backend_path} does not exist!"
+
         for file in ["compiler.py", "driver.py"]:
-            assert os.path.exists(os.path.join(backend_path, file))
-        # update
+            assert os.path.exists(os.path.join(backend_path, file)), f"${file} does not exist in ${backend_path}"
+
+        install_dir = os.path.join(os.path.dirname(__file__), "triton", "backends", backend_name)
         package_data = [f"{os.path.relpath(p, backend_path)}/*" for p, _, _, in os.walk(backend_path)]
-        ret.append(
-            Backend(name=backend, package_data=package_data, src_dir=curr_path, backend_dir=backend_path,
-                    install_dir=install_dir))
-    return ret
+        return Backend(name=backend_name, package_data=package_data, src_dir=backend_src_dir, backend_dir=backend_path,
+                       install_dir=install_dir, is_external=is_external)
+
+    # Copy all in-tree backends under triton/third_party.
+    @staticmethod
+    def copy(active):
+        return [BackendInstaller.prepare(backend) for backend in active]
+
+    # Copy all external plugins provided by the `TRITON_PLUGIN_DIRS` env var.
+    # TRITON_PLUGIN_DIRS is a semicolon-separated list of paths to the plugins.
+    # Expect to find the name of the backend under dir/backend/name.conf
+    @staticmethod
+    def copy_externals():
+        backend_dirs = os.getenv("TRITON_PLUGIN_DIRS")
+        if backend_dirs is None:
+            return []
+        backend_dirs = backend_dirs.strip().split(";")
+        backend_names = [Path(os.path.join(dir, "backend", "name.conf")).read_text().strip() for dir in backend_dirs]
+        return [
+            BackendInstaller.prepare(backend_name, backend_src_dir=backend_src_dir, is_external=True)
+            for backend_name, backend_src_dir in zip(backend_names, backend_dirs)
+        ]
 
 
 # Taken from https://github.com/pytorch/pytorch/blob/master/tools/setup_helpers/env.py
@@ -76,16 +101,6 @@ def get_build_type():
         return "TritonRelBuildWithAsserts"
 
 
-def get_codegen_backends():
-    backends = []
-    env_prefix = "TRITON_CODEGEN_"
-    for name, _ in os.environ.items():
-        if name.startswith(env_prefix) and check_env_flag(name):
-            assert name.count(env_prefix) <= 1
-            backends.append(name.replace(env_prefix, '').lower())
-    return backends
-
-
 # --- third party packages -----
 
 
@@ -102,8 +117,10 @@ class Package(NamedTuple):
 
 
 def get_pybind11_package_info():
-    name = "pybind11-2.11.1"
-    url = "https://github.com/pybind/pybind11/archive/refs/tags/v2.11.1.tar.gz"
+    with open("../cmake/pybind11-version.txt", "r") as pybind11_version_file:
+        version = pybind11_version_file.read().strip()
+    name = f"pybind11-{version}"
+    url = f"https://github.com/pybind/pybind11/archive/refs/tags/v{version}.tar.gz"
     return Package("pybind11", name, url, "PYBIND11_INCLUDE_DIR", "", "PYBIND11_SYSPATH")
 
 
@@ -132,8 +149,8 @@ def get_llvm_package_info():
         return Package("llvm", "LLVM-C.lib", "", "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH")
     # use_assert_enabled_llvm = check_env_flag("TRITON_USE_ASSERT_ENABLED_LLVM", "False")
     # release_suffix = "assert" if use_assert_enabled_llvm else "release"
-    llvm_hash_file = open("../cmake/llvm-hash.txt", "r")
-    rev = llvm_hash_file.read(8)
+    with open("../cmake/llvm-hash.txt", "r") as llvm_hash_file:
+        rev = llvm_hash_file.read(8)
     name = f"llvm-{rev}-{system_suffix}"
     url = f"https://tritonlang.blob.core.windows.net/llvm-builds/{name}.tar.gz"
     return Package("llvm", name, url, "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH")
@@ -145,7 +162,8 @@ def open_url(url):
         'User-Agent': user_agent,
     }
     request = urllib.request.Request(url, None, headers)
-    return urllib.request.urlopen(request)
+    # Set timeout to 300 seconds to prevent the request from hanging forver
+    return urllib.request.urlopen(request, timeout=300)
 
 
 # ---- package data ---
@@ -198,17 +216,17 @@ def download_and_copy(src_path, variable, version, url_func):
         return
     base_dir = os.path.dirname(__file__)
     system = platform.system()
-    arch = {"x86_64": "64", "AMD64": "64", "arm64": "aarch64"}[platform.machine()]
+    arch = {"x86_64": "64", "AMD64": "64", "arm64": "aarch64", "aarch64": "aarch64"}[platform.machine()]
     supported = {"Linux": "linux", "Windows": "win"}
     is_supported = system in supported
-    if is_supported:
-        url = url_func(supported[system], arch, version)
+    if not is_supported: return
+    url = url_func(supported[system], arch, version)
     tmp_path = os.path.join(triton_cache_path, "nvidia")  # path to cache the download
+    src_path += ".exe" if os.name == "nt" else ""
     dst_path = os.path.join(base_dir, os.pardir, "third_party", "nvidia", "backend", src_path)  # final binary path
     src_path = os.path.join(tmp_path, src_path)
-    src_path += ".exe" if os.name == "nt" else ""
     download = not os.path.exists(src_path)
-    if os.path.exists(dst_path) and is_supported:
+    if os.path.exists(dst_path):
         curr_version = subprocess.check_output([dst_path, "--version"]).decode("utf-8").strip()
         curr_version = re.search(r"V([.|\d]+)", curr_version).group(1)
         download = download or curr_version != version
@@ -305,7 +323,8 @@ class CMakeBuild(build_ext):
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + extdir, "-DTRITON_BUILD_TUTORIALS=OFF",
             "-DTRITON_BUILD_PYTHON_MODULE=ON", "-DPython3_EXECUTABLE:FILEPATH=" + sys.executable,
             "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON", "-DPYTHON_INCLUDE_DIRS=" + python_include_dir,
-            "-DTRITON_CODEGEN_BACKENDS=" + ';'.join([b.name for b in backends])
+            "-DTRITON_CODEGEN_BACKENDS=" + ';'.join([b.name for b in backends if not b.is_external]),
+            "-DTRITON_PLUGIN_DIRS=" + ';'.join([b.src_dir for b in backends if b.is_external])
         ]
         if platform.system() == "Windows":
             installed_base = sysconfig.get_config_var('installed_base')
@@ -318,13 +337,6 @@ class CMakeBuild(build_ext):
         # configuration
         cfg = get_build_type()
         build_args = ["--config", cfg]
-
-        # third-party backend
-
-        # codegen_backends = get_codegen_backends()
-        # if len(codegen_backends) > 0:
-        #     all_codegen_backends = ';'.join(codegen_backends)
-        #     cmake_args += ["-DTRITON_CODEGEN_BACKENDS=" + all_codegen_backends]
 
         if platform.system() == "Windows":
             cmake_args += ["-DCMAKE_BUILD_TYPE=" + cfg]
@@ -370,32 +382,32 @@ class CMakeBuild(build_ext):
         subprocess.check_call(["cmake", "--build", ".", "--target", "mlir-doc"], cwd=cmake_dir)
 
 
-if platform.system() in ["Linux", "Windows"]:
-    download_and_copy(
-        src_path="bin/ptxas",
-        variable="TRITON_PTXAS_PATH",
-        version="12.3.52",
-        url_func=lambda system, arch, version:
-        f"https://anaconda.org/nvidia/cuda-nvcc/{version}/download/{system}-{arch}/cuda-nvcc-{version}-0.tar.bz2",
-    )
-    download_and_copy(
-        src_path="bin/cuobjdump",
-        variable="TRITON_CUOBJDUMP_PATH",
-        version="12.3.52",
-        url_func=lambda system, arch, version:
-        f"https://anaconda.org/nvidia/cuda-cuobjdump/{version}/download/{system}-{arch}/cuda-cuobjdump-{version}-0.tar.bz2",
-    )
-    download_and_copy(
-        src_path="bin/nvdisasm",
-        variable="TRITON_NVDISASM_PATH",
-        version="12.3.52",
-        url_func=lambda system, arch, version:
-        f"https://anaconda.org/nvidia/cuda-nvdisasm/{version}/download/{system}-{arch}/cuda-nvdisasm-{version}-0.tar.bz2",
-    )
-backends = ["nvidia", "amd"]
-if os.name == "nt":
-    backends = ["nvidia"]
-backends = _copy_backends(backends)
+with open("../cmake/nvidia-toolchain-version.txt", "r") as nvidia_version_file:
+    NVIDIA_TOOLCHAIN_VERSION = nvidia_version_file.read().strip()
+
+download_and_copy(
+    src_path="bin/ptxas",
+    variable="TRITON_PTXAS_PATH",
+    version=NVIDIA_TOOLCHAIN_VERSION,
+    url_func=lambda system, arch, version:
+    f"https://anaconda.org/nvidia/cuda-nvcc/{version}/download/{system}-{arch}/cuda-nvcc-{version}-0.tar.bz2",
+)
+download_and_copy(
+    src_path="bin/cuobjdump",
+    variable="TRITON_CUOBJDUMP_PATH",
+    version=NVIDIA_TOOLCHAIN_VERSION,
+    url_func=lambda system, arch, version:
+    f"https://anaconda.org/nvidia/cuda-cuobjdump/{version}/download/{system}-{arch}/cuda-cuobjdump-{version}-0.tar.bz2",
+)
+download_and_copy(
+    src_path="bin/nvdisasm",
+    variable="TRITON_NVDISASM_PATH",
+    version=NVIDIA_TOOLCHAIN_VERSION,
+    url_func=lambda system, arch, version:
+    f"https://anaconda.org/nvidia/cuda-nvdisasm/{version}/download/{system}-{arch}/cuda-nvdisasm-{version}-0.tar.bz2",
+)
+
+backends = [*BackendInstaller.copy(["nvidia"] if os.name == "nt" else ["nvidia", "amd"]), *BackendInstaller.copy_externals()]
 
 
 def add_link_to_backends():
@@ -452,6 +464,7 @@ setup(
         "triton/compiler",
         "triton/language",
         "triton/language/extra",
+        "triton/language/extra/cuda",
         "triton/ops",
         "triton/ops/blocksparse",
         "triton/runtime",

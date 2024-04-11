@@ -4,7 +4,7 @@ from triton.backends.nvidia.driver import CudaUtils
 
 from dataclasses import dataclass
 import functools
-from typing import Any
+from typing import Any, Tuple
 import hashlib
 import re
 import tempfile
@@ -13,6 +13,8 @@ import os
 import subprocess
 from pathlib import Path
 
+
+@functools.lru_cache()
 def _path_to_binary(binary: str):
     binary += ".exe" if os.name == "nt" else ""
     paths = [
@@ -20,23 +22,21 @@ def _path_to_binary(binary: str):
         os.path.join(os.path.dirname(__file__), "bin", binary),
     ]
 
-    for p in paths:
+    for bin in paths:
         if os.name != "nt":
-            bin = p.split(" ")[0]
-        else:
-            bin = p
+            bin = bin.split(" ")[0]
         if os.path.exists(bin) and os.path.isfile(bin):
             result = subprocess.check_output([bin, "--version"], stderr=subprocess.STDOUT)
             if result is not None:
                 version = re.search(r".*release (\d+\.\d+).*", result.decode("utf-8"), flags=re.MULTILINE)
                 if version is not None:
-                    return p, version.group(1)
+                    return bin, version.group(1)
     raise RuntimeError(f"Cannot find {binary}")
 
 
 @functools.lru_cache()
 def get_ptxas_version():
-    version = subprocess.check_output([_path_to_binary("ptxas")[0], "--version"])
+    version = subprocess.check_output([_path_to_binary("ptxas")[0], "--version"]).decode("utf-8")
     return version
 
 
@@ -56,6 +56,12 @@ def ptx_get_version(cuda_version) -> int:
     raise RuntimeError("Triton only support CUDA 10.0 or higher")
 
 
+@functools.lru_cache(None)
+def file_hash(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
 @dataclass(frozen=True)
 class CUDAOptions:
     num_warps: int = 4
@@ -63,9 +69,10 @@ class CUDAOptions:
     num_stages: int = 3
     cluster_dims: tuple = (1, 1, 1)
     ptx_version: int = None
-    optimize_epilogue: bool = False
     enable_fp_fusion: bool = True
     allow_fp8e4nv: bool = False
+    default_dot_input_precision: str = "tf32"
+    allowed_dot_input_precisions: Tuple[str] = ("tf32", "tf32x3", "ieee")
     max_num_imprecise_acc_default: bool = None
     extern_libs: dict = None
     debug: bool = False
@@ -80,8 +87,10 @@ class CUDAOptions:
                "num_warps must be a power of 2"
 
     def hash(self):
-        key = '_'.join([f'{name}-{val}' for name, val in self.__dict__.items()])
-        return hashlib.md5(key.encode("utf-8")).hexdigest()
+        hash_dict = dict(self.__dict__)
+        hash_dict["extern_libs"] = tuple((k, file_hash(v)) for k, v in sorted(hash_dict["extern_libs"]))
+        key = "_".join([f"{name}-{val}" for name, val in sorted(hash_dict.items())])
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 class CUDABackend(BaseBackend):
@@ -94,12 +103,20 @@ class CUDABackend(BaseBackend):
         super().__init__(target)
         self.capability = target[1]
         assert isinstance(self.capability, int)
+        self.binary_ext = "cubin"
 
     def parse_options(self, opts) -> Any:
         args = {k: opts[k] for k in CUDAOptions.__dataclass_fields__.keys() if k in opts}
         args["allow_fp8e4nv"] = self.capability >= 89
         args["max_num_imprecise_acc_default"] = 2**30 if self.capability == 90 else 0
         return CUDAOptions(**args)
+
+    def get_codegen_implementation(self):
+        import triton.language.extra.cuda as cuda
+        codegen_fns = dict()
+        codegen_fns[
+            "convert_custom_types"] = cuda.convert_custom_float8_sm80 if self.capability >= 80 else cuda.convert_custom_float8_sm70
+        return codegen_fns
 
     def load_dialects(self, ctx):
         nvidia.load_dialects(ctx)
@@ -132,14 +149,14 @@ class CUDABackend(BaseBackend):
         passes.ttir.add_convert_to_ttgpuir(pm, opt.num_warps, 32, opt.num_ctas, capability)
         # optimize TTGIR
         passes.ttgpuir.add_coalesce(pm)
+        if capability // 10 >= 8:
+            passes.ttgpuir.add_f32_dot_tc(pm)
         # TODO(Qingyi): Move PlanCTAPass to the front of CoalescePass
         nvidia.passes.ttnvgpuir.add_plan_cta(pm, cluster_info)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
         passes.ttgpuir.add_accelerate_matmul(pm, capability)
         passes.ttgpuir.add_remove_layout_conversions(pm)
-        if opt.optimize_epilogue:
-            passes.ttgpuir.add_optimize_epilogue(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm)
         passes.common.add_cse(pm)
         if capability // 10 >= 8:
@@ -169,7 +186,7 @@ class CUDABackend(BaseBackend):
         # TritonGPU -> LLVM-IR (MLIR)
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
-        passes.ttgpuir.add_decompose_unsupported_conversions(pm)
+        nvidia.passes.ttgpuir.add_decompose_unsupported_conversions(pm)
         passes.convert.add_scf_to_cf(pm)
         passes.convert.add_index_to_llvmir(pm)
         passes.ttgpuir.add_allocate_shared_memory(pm)
@@ -188,8 +205,8 @@ class CUDABackend(BaseBackend):
         llvm_mod = llvm.to_module(mod, context)
         nvidia.set_nvvm_reflect_ftz(llvm_mod)
         if options.extern_libs:
-            for name, path in options.extern_libs:
-                llvm.link_extern_lib(llvm_mod, path)
+            paths = [path for (name, path) in options.extern_libs]
+            llvm.link_extern_libs(llvm_mod, paths)
         llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3)
         # Set kernel attributes
         # kernels = [fn for fn in llvm_mod.get_functions() if fn.has_public_visibility() and not fn.is_declaration()]
@@ -233,19 +250,16 @@ class CUDABackend(BaseBackend):
             fsrc.flush()
             fbin = fsrc.name + '.o'
 
-            line_info = '' if os.environ.get('TRITON_DISABLE_LINE_INFO') else '-lineinfo'
-            fmad = '' if opt.enable_fp_fusion else '--fmad=false'
-            suffix = 'a' if capability == 90 else ''
-            cmd = [ptxas]
-            cmd += [line_info] if line_info != '' else []
-            cmd += [fmad] if fmad != '' else []
-            cmd += ['-v']
+            line_info = '' if os.environ.get('TRITON_DISABLE_LINE_INFO') else ' -lineinfo'
+            fmad = '' if opt.enable_fp_fusion else ' --fmad=false'
+            suffix = 'a ' if capability == 90 else ' '
             if os.environ.get("DISABLE_PTXAS_OPT", "0") == "1":
-              cmd += ["-opt-level", "0"]
-            cmd += [f'--gpu-name=sm_{capability}{suffix}', fsrc.name, '-o', fbin]
+                cmd = f'{ptxas}{line_info}{fmad} -v --opt-level 0 --gpu-name=sm_{capability}{suffix}{fsrc.name} -o {fbin} 2> {flog.name}'
+            else:
+                cmd = f'{ptxas}{line_info}{fmad} -v --gpu-name=sm_{capability}{suffix}{fsrc.name} -o {fbin} 2> {flog.name}'
 
             try:
-                subprocess.run(cmd, check=True, stderr=flog)
+                subprocess.run(cmd, shell=True, check=True)
             except subprocess.CalledProcessError as e:
                 with open(flog.name) as log_file:
                     log = log_file.read()
@@ -256,17 +270,16 @@ class CUDABackend(BaseBackend):
                         f'Please run `ptxas {fsrc.name}` to confirm that this is a bug in `ptxas`\n{log}')
                 else:
                     raise RuntimeError(f'`ptxas` failed with error code {e.returncode}: \n{log}')
+            finally:
+                if os.path.exists(fsrc.name):
+                    os.remove(fsrc.name)
+                if os.path.exists(flog.name):
+                    os.remove(flog.name)
 
             with open(fbin, 'rb') as f:
                 cubin = f.read()
             if os.path.exists(fbin):
                 os.remove(fbin)
-
-        if os.path.exists(fsrc.name):
-            os.remove(fsrc.name)
-        if os.path.exists(flog.name):
-            os.remove(flog.name)
-
         return cubin
 
     def add_stages(self, stages, options):
@@ -278,5 +291,5 @@ class CUDABackend(BaseBackend):
 
     @functools.lru_cache()
     def hash(self):
-        version = subprocess.check_output([_path_to_binary("ptxas")[0], "--version"]).decode("utf-8")
+        version = get_ptxas_version()
         return f'{version}-{self.capability}'

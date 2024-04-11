@@ -14,22 +14,13 @@ template <typename T> class OperationPass;
 
 namespace triton {
 
-enum Target { NVVM, ROCDL, Default = NVVM };
-
 #define GEN_PASS_DECL
 #include "triton/Conversion/TritonGPUToLLVM/Passes.h.inc"
 
 namespace gpu {
-std::unique_ptr<OperationPass<ModuleOp>>
-createDecomposeUnsupportedConversionsPass();
-
 std::unique_ptr<OperationPass<ModuleOp>> createAllocateSharedMemoryPass();
 
 } // namespace gpu
-
-std::unique_ptr<OperationPass<ModuleOp>> createConvertTritonGPUToLLVMPass();
-std::unique_ptr<OperationPass<ModuleOp>>
-createConvertTritonGPUToLLVMPass(int32_t computeCapability, Target target);
 
 #define GEN_PASS_REGISTRATION
 #include "triton/Conversion/TritonGPUToLLVM/Passes.h.inc"

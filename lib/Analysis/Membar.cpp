@@ -2,11 +2,7 @@
 #include "triton/Analysis/Alias.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
-#include "../lib/Conversion/TritonGPUToLLVM/Utility.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "triton/Conversion/TritonGPUToLLVM/PTXAsmFormat.h"
-#include "triton/Dialect/TritonGPU/Transforms/Utility.h"
-
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include <deque>
@@ -104,10 +100,13 @@ void MembarAnalysis::insertBarrier(Operation *op, OpBuilder *builder) {
 void MembarAnalysis::update(Operation *op, BlockInfo *blockInfo,
                             FuncBlockInfoMapT *funcBlockInfoMap,
                             OpBuilder *builder) {
-  if (isa<triton::gpu::ExtractSliceOp, triton::gpu::AllocTensorOp,
-          triton::gpu::DeallocTensorOp, triton::TransOp>(op)) {
-    // FIXME(Keren): extract_slice is always alias for now
+  if (isa<triton::gpu::LocalDeallocOp, triton::gpu::MemDescSubviewOp,
+          triton::TransOp>(op)) {
     return;
+  }
+  if (auto alloc = dyn_cast<triton::gpu::LocalAllocOp>(op)) {
+    if (!alloc.getSrc())
+      return;
   }
 
   if (isa<gpu::BarrierOp>(op)) {
@@ -139,9 +138,8 @@ void MembarAnalysis::update(Operation *op, BlockInfo *blockInfo,
     for (Value value : op->getOperands()) {
       for (auto bufferId : allocation->getBufferIds(value)) {
         if (bufferId != Allocation::InvalidBufferId) {
-          if (isa<triton::gpu::InsertSliceAsyncOp, tensor::InsertSliceOp>(op)) {
-            // FIXME(Keren): insert_slice and insert_slice_async are always
-            // alias for now
+          if (isa<triton::gpu::AsyncCopyGlobalToLocalOp>(op)) {
+            // Global -> shared memory
             curBlockInfo.syncWriteIntervals.insert(
                 allocation->getAllocatedInterval(bufferId));
           } else {

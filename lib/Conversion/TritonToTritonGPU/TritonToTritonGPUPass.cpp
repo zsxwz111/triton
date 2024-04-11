@@ -8,6 +8,7 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
+#include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/TritonGPUConversion.h"
 #include "llvm/ADT/APSInt.h"
@@ -123,10 +124,13 @@ void populateMathPatternsAndLegality(TritonGPUTypeConverter &typeConverter,
                                      TritonGPUConversionTarget &target) {
   MLIRContext *context = patterns.getContext();
   // Rewrite rule
-  patterns.add<GenericOpPattern<math::ExpOp>, GenericOpPattern<math::CosOp>,
+  patterns.add<GenericOpPattern<math::ExpOp>, GenericOpPattern<math::Exp2Op>,
+               GenericOpPattern<math::FloorOp>, GenericOpPattern<math::CosOp>,
                GenericOpPattern<math::SinOp>, GenericOpPattern<math::LogOp>,
+               GenericOpPattern<math::Log2Op>, GenericOpPattern<math::ErfOp>,
                GenericOpPattern<math::AbsFOp>, GenericOpPattern<math::AbsIOp>,
-               GenericOpPattern<math::SqrtOp>>(typeConverter, context);
+               GenericOpPattern<math::SqrtOp>, GenericOpPattern<math::RsqrtOp>,
+               GenericOpPattern<math::FmaOp>>(typeConverter, context);
 }
 
 //
@@ -212,7 +216,7 @@ struct TritonDotPattern : public OpConversionPattern<triton::DotOp> {
   LogicalResult
   matchAndRewrite(triton::DotOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    RankedTensorType origType = op.getType().cast<RankedTensorType>();
+    RankedTensorType origType = op.getType();
     auto origShape = origType.getShape();
     auto typeConverter = getTypeConverter<TritonGPUTypeConverter>();
     int numWarps = typeConverter->getNumWarps();
@@ -266,7 +270,7 @@ struct TritonDotPattern : public OpConversionPattern<triton::DotOp> {
     c = rewriter.create<triton::gpu::ConvertLayoutOp>(c.getLoc(), retType, c);
 
     addNamedAttrs(rewriter.replaceOpWithNewOp<triton::DotOp>(
-                      op, retType, a, b, c, adaptor.getAllowTF32(),
+                      op, retType, a, b, c, adaptor.getInputPrecision(),
                       adaptor.getMaxNumImpreciseAcc()),
                   adaptor.getAttributes());
     return success();
@@ -290,8 +294,8 @@ struct TritonCatPattern : public OpConversionPattern<triton::CatOp> {
                        .cast<RankedTensorType>();
     auto retEncoding =
         retType.getEncoding().cast<triton::gpu::BlockedEncodingAttr>();
-    auto lhsType = adaptor.getLhs().getType().cast<RankedTensorType>();
-    auto rhsType = adaptor.getRhs().getType().cast<RankedTensorType>();
+    auto lhsType = adaptor.getLhs().getType();
+    auto rhsType = adaptor.getRhs().getType();
     auto lhsTotalElemsPerThread = triton::gpu::getTotalElemsPerThread(lhsType);
     auto rhsTotalElemsPerThread = triton::gpu::getTotalElemsPerThread(rhsType);
     auto retTotalElemsPerThread = triton::gpu::getTotalElemsPerThread(retType);
@@ -321,40 +325,77 @@ struct TritonCatPattern : public OpConversionPattern<triton::CatOp> {
   }
 };
 
-struct TritonInterleaveOpPattern
-    : public OpConversionPattern<triton::ExperimentalInterleaveOp> {
+struct TritonJoinOpPattern : public OpConversionPattern<triton::JoinOp> {
   using OpConversionPattern::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(ExperimentalInterleaveOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(JoinOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const {
-    // Preconditions:
-    //   * The two inputs shapes and encodings are the same.
-    //   * The input encoding is a blocked layout.
-    //
-    // These are mostly taken care of by the nature of this rewrite: All the
-    // operands provided by `adaptor` have the default blocked layout.
-    //
-    // Postconditions:
-    //   * Output shape is `input_shape[0:-1] + [2 * input_shape[-1]]`.
-    //   * Output encoding is the input encoding except the last dimension has
-    //     twice as many elems per thread.
-    assert(adaptor.getLhs().getType() == adaptor.getRhs().getType());
-    auto operandEnc = adaptor.getLhs()
-                          .getType()
-                          .cast<RankedTensorType>()
-                          .getEncoding()
-                          .cast<BlockedEncodingAttr>();
-    auto newRetEncoding = inferDstEncoding(op, operandEnc);
-    if (!newRetEncoding.has_value())
-      return failure();
+    // Simply rely on type inference for this op.  (Notably, GenericOpPattern
+    // does not do this, instead it assigns the default layout to the ins and
+    // outs.)
+    addNamedAttrs(rewriter.replaceOpWithNewOp<triton::JoinOp>(
+                      op, adaptor.getLhs(), adaptor.getRhs()),
+                  adaptor.getAttributes());
+    return success();
+  }
+};
 
-    auto retType = this->getTypeConverter()
-                       ->convertType(op.getType())
-                       .cast<RankedTensorType>();
-    auto newRetType = RankedTensorType::get(
-        retType.getShape(), retType.getElementType(), *newRetEncoding);
-    addNamedAttrs(rewriter.replaceOpWithNewOp<triton::ExperimentalInterleaveOp>(
-                      op, newRetType, adaptor.getOperands()),
+struct TritonSplitOpPattern : public OpConversionPattern<triton::SplitOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(SplitOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const {
+    auto src = adaptor.getSrc();
+    auto srcTy = src.getType().cast<RankedTensorType>();
+    auto srcEnc = srcTy.getEncoding().dyn_cast<BlockedEncodingAttr>();
+    int rank = srcEnc.getOrder().size();
+    auto typeConverter = getTypeConverter<TritonGPUTypeConverter>();
+
+    // The operand to split must have:
+    //  - a blocked layout, with
+    //  - sizePerThread = 2 in the last dimension,
+    //  - threadsPerWarp, warpsPerCTA, and CTAsPerCGA = 1 in the last dim, and
+    //  - the last dimension minor.
+    // If that's not the case, add a convert before the split.
+    if (!srcEnc || srcEnc.getSizePerThread().back() != 2 ||
+        srcEnc.getOrder().front() != rank - 1) {
+      // If we take the default encoding for the op's result (i.e. post-split)
+      // and add 1 to the end of each dim, that gives us what we want.  Other
+      // than making a legal src encoding, our choice of layout doesn't matter;
+      // it'll get fixed by RemoveLayoutConversions.
+      auto defaultEnc = getDefaultBlockedEncoding(
+          getContext(),
+          op.getResult(0).getType().cast<RankedTensorType>().getShape(),
+          typeConverter->getNumWarps(), typeConverter->getThreadsPerWarp(),
+          typeConverter->getNumCTAs());
+
+      auto append = [&](ArrayRef<unsigned> vals, unsigned val) {
+        SmallVector<unsigned> res(vals);
+        res.push_back(val);
+        return res;
+      };
+      auto prepend = [&](ArrayRef<unsigned> vals, unsigned val) {
+        SmallVector<unsigned> res;
+        res.push_back(val);
+        res.append(vals.begin(), vals.end());
+        return res;
+      };
+
+      srcEnc = BlockedEncodingAttr::get(
+          getContext(), append(defaultEnc.getSizePerThread(), 2),
+          append(defaultEnc.getThreadsPerWarp(), 1),
+          append(defaultEnc.getWarpsPerCTA(), 1),
+          prepend(defaultEnc.getOrder(), rank - 1),
+          CTALayoutAttr::get(getContext(),
+                             append(defaultEnc.getCTAsPerCGA(), 1),
+                             append(defaultEnc.getCTASplitNum(), 1),
+                             prepend(defaultEnc.getCTAOrder(), rank - 1)));
+      srcTy = RankedTensorType::get(srcTy.getShape(), srcTy.getElementType(),
+                                    srcEnc);
+      src = rewriter.create<ConvertLayoutOp>(op.getLoc(), srcTy, src);
+    }
+
+    addNamedAttrs(rewriter.replaceOpWithNewOp<triton::SplitOp>(op, src),
                   adaptor.getAttributes());
     return success();
   }
@@ -371,32 +412,6 @@ struct TritonTransPattern : public OpConversionPattern<TransOp> {
     auto srcEnc = srcTy.getEncoding();
     if (!srcEnc)
       return failure();
-
-    // inferTransOpEncoding chooses a layout for the transpose that makes it a
-    // "nop".  For example, if the src layout has thread [i,j] holding element
-    // [i,j] of the tensor, then the transposed layout has thread [i,j] holding
-    // element [j,i].  In other words, the transpose simply "renames" the
-    // elements, while leaving them in place.
-    //
-    // This will be called automatically, but it only works if the src encoding
-    // is blocked or shared.  If it's anything else, materialize to shared
-    // first.
-    //
-    // Unrelatedly, if the transpose feeds into a dot op, we also force it
-    // into shared memory.  Dot ops expect this.
-    if ((!srcEnc.isa<BlockedEncodingAttr>() &&
-         !srcEnc.isa<SharedEncodingAttr>()) ||
-        (!srcEnc.isa<SharedEncodingAttr>() &&
-         any_of(op->getUsers(),
-                [](Operation *user) { return isa<DotOp>(user); }))) {
-      srcEnc = SharedEncodingAttr::get(
-          getContext(), 1, 1, 1, /*order=*/SmallVector<unsigned>(op.getOrder()),
-          getCTALayout(srcEnc));
-      srcTy = RankedTensorType::get(srcTy.getShape(), srcTy.getElementType(),
-                                    srcEnc);
-      src = rewriter.create<ConvertLayoutOp>(src.getLoc(), srcTy, src);
-    }
-
     addNamedAttrs(rewriter.replaceOpWithNewOp<TransOp>(op, src, op.getOrder()),
                   adaptor.getAttributes());
     return success();
@@ -415,9 +430,8 @@ struct TritonBroadcastPattern
     auto srcEncoding = srcType.getEncoding();
     if (!srcEncoding)
       return failure();
-    auto opType = op.getType().cast<RankedTensorType>();
-    Type retType = RankedTensorType::get(opType.getShape(),
-                                         opType.getElementType(), srcEncoding);
+    Type retType = RankedTensorType::get(
+        op.getType().getShape(), op.getType().getElementType(), srcEncoding);
     // Type retType = this->getTypeConverter()->convertType(op.getType());
     addNamedAttrs(rewriter.replaceOpWithNewOp<triton::BroadcastOp>(
                       op, retType, adaptor.getOperands()),
@@ -451,7 +465,7 @@ struct TritonScanPattern : public OpConversionPattern<triton::ScanOp> {
   matchAndRewrite(triton::ScanOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto newScan = rewriter.create<triton::ScanOp>(
-        op.getLoc(), adaptor.getOperands(), adaptor.getAxis());
+        op.getLoc(), adaptor.getOperands(), adaptor.getAxis(), op.getReverse());
     addNamedAttrs(newScan, adaptor.getAttributes());
 
     auto &newCombineOp = newScan.getCombineOp();
@@ -519,8 +533,11 @@ void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
       GenericOpPattern<triton::FpToFpOp>, GenericOpPattern<triton::IntToPtrOp>,
       GenericOpPattern<triton::PtrToIntOp>, GenericOpPattern<triton::SplatOp>,
       TritonBroadcastPattern, GenericOpPattern<triton::AddPtrOp>,
-      TritonCatPattern, TritonInterleaveOpPattern,
+      TritonCatPattern, TritonJoinOpPattern, TritonSplitOpPattern,
       GenericOpPattern<triton::ClampFOp>,
+      GenericOpPattern<triton::PreciseSqrtOp>,
+      GenericOpPattern<triton::PreciseDivFOp>,
+      GenericOpPattern<triton::MulhiUIOp>,
       GenericOpPattern<triton::ElementwiseInlineAsmOp>, TritonReducePattern,
       GenericOpPattern<triton::ReduceReturnOp>, TritonScanPattern,
       GenericOpPattern<triton::ScanReturnOp>,
@@ -754,9 +771,6 @@ public:
     populateSCFPatterns(typeConverter, patterns);
     populateCFPatterns(typeConverter, patterns);
 
-    if (failed(applyPartialConversion(mod, target, std::move(patterns))))
-      return signalPassFailure();
-
     auto inti = llvm::APSInt(32, false);
     auto i32_ty = IntegerType::get(mod->getContext(), 32);
 
@@ -773,6 +787,9 @@ public:
     mod->setAttr(AttrComputeCapabilityName,
                  IntegerAttr::get(
                      i32_ty, llvm::APInt(32, computeCapability.getValue())));
+
+    if (failed(applyPartialConversion(mod, target, std::move(patterns))))
+      return signalPassFailure();
 
     // update layouts
     //  broadcast src => multicast, dst => broadcasted

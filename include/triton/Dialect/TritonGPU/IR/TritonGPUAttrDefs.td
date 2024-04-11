@@ -75,7 +75,7 @@ def CTALayoutAttr : TritonGPU_Attr<"CTALayout", "cta_layout"> {
 
   let description = [{
 Describes how blocks are distributed among the cooperate thread arrays (aka
-CTAs, aka thread blocks) in a cooperate thread group (aka CTA, aka thread group
+CTAs, aka thread blocks) in a cooperate thread group (aka CTG, aka thread group
 cluster).  CGAs were introduced in Hopper (sm90).
 
 The tensor is divided up into CTASplitNum pieces, which are distributed among
@@ -162,7 +162,12 @@ different cuda threads in the programs, via shared memory. In other words,
 for all indices i \in R^d, \mathcal{L}(i) = {0, 1, ..., 32*num_warps - 1}.
 
 In order to avoid shared memory bank conflicts, elements may be swizzled
-in memory. For example, a swizzled row-major layout could store its data
+in memory. Swizzling is defined with three parameters: vec, perPhase and
+maxPhase. Vec defines group of the elements that are accessed contiguously.
+Every perPhase number of rows of data the elements will be rotated right by
+vec, so in phase P the 0th element of the row is at the position P*vec.
+maxPhase defines after how many phases the rotation is reset.
+For example, a swizzled row-major layout could store its data
 as follows:
 
 A_{0, 0}  A_{0, 1}  A_{0, 2}  A_{0, 3} ...   [phase 0] \ per_phase = 2
@@ -223,9 +228,7 @@ compared to 1*64 when the hasLeadingOffset is false.
                      "bool":$needTrans), [{
 
         // ---- begin GFX908/GFX90A ----
-        auto mfmaEnc = dotOpEnc.getParent().dyn_cast<MfmaEncodingAttr>();
-
-        if (mfmaEnc) {
+        if (auto mfmaEnc = dotOpEnc.getParent().dyn_cast<AMDMfmaEncodingAttr>()) {
           int kDimNum = dotOpEnc.getOpIdx() == 0 ? 1 : 0;
           bool isKDimInner = (order[0] == kDimNum);
           if (isKDimInner) {
@@ -246,13 +249,39 @@ compared to 1*64 when the hasLeadingOffset is false.
             // For now, the k_base rules are as follows
             // 1. All selected mfma instructions produce a single block
             // 2. For f16 data type, 2 VGPRs are used for operand A --> k_base = 4
-            // 3. For non-f16 data types, 1 VGPR are used for operand A
+            // 3. For non-f16 data types, 1 VGPR is used for operand A
             //    k_base = 32 / elemTypeInBits
             // 4. TODO: what about f64?
             //
             // maxPhase is set to SIMDWidth / perPhase
             int vecSize = ((typeWidthInBit == 16) ? 64 : 32 ) / typeWidthInBit;
             int maxPhase = SIMDWidth / perPhase;
+
+            // TODO (zhanglx): figure out better parameters for mfma4
+            if (mfmaEnc.getMDim() == 4)
+              maxPhase = 4;
+
+            return get(context, vecSize, perPhase, maxPhase, order, CTALayout);
+          } else {
+            // Do not swizzle in case k dimension is not innermost.
+            // In this case accesses will go in different banks even without swizzling.
+            return get(context, 1, 1, 1, order, CTALayout);
+          }
+        }
+
+        // ---- begin GFX11 ----
+        if (dotOpEnc.getParent().isa<AMDWmmaEncodingAttr>()) {
+          if (dotOpEnc.getOpIdx() == 0) {
+            const int numBanks = 32;
+            const int bankBitWidth = 32;
+
+            // number of inner dimension rows per one pattern repeat
+            int innerDimLength = shape[order[0]];
+            int elemsPerOneBanksRow = (numBanks * bankBitWidth) / typeWidthInBit;
+
+            int perPhase = std::max(1, elemsPerOneBanksRow / innerDimLength);
+            int vecSize = ((typeWidthInBit == 16) ? 64 : 32 ) / typeWidthInBit;
+            int maxPhase = 16 / perPhase;
 
             return get(context, vecSize, perPhase, maxPhase, order, CTALayout);
           } else {
@@ -296,9 +325,10 @@ compared to 1*64 when the hasLeadingOffset is false.
           int perPhase = 128 / (shapePerCTA[order[0]] * 4 / dotOpEnc.getKWidth());
           perPhase = std::max<int>(perPhase, 1);
           std::vector<size_t> matShape = {8, 8, 4 * dotOpEnc.getKWidth()};
-          // for now, disable swizzle when using transposed int8 tensor cores
-          if ((32 / typeWidthInBit != dotOpEnc.getKWidth()) && order[0] == inner)
-            return get(context, 1, 1, 1, order, CTALayout);
+          int vecWidth = 32 / typeWidthInBit;
+          if (vecWidth != dotOpEnc.getKWidth() && order[0] == inner) {
+              perPhase = std::max<int>(perPhase, 2 * vecWidth);
+          }
           int rank = order.size();
           // --- handle A operand ---
           if (opIdx == 0) { // compute swizzling for A operand
@@ -695,16 +725,23 @@ def MmaEncodingTrait : AttrInterface<"MmaEncodingTrait"> {
   ];
 }
 
-def MfmaEncodingAttr : DistributedEncoding<"MfmaEncoding", "mfma_encoding", [MmaEncodingTrait]> {
-  let mnemonic = "mfma";
+def AMDMfmaEncodingAttr : DistributedEncoding<"AMDMfmaEncoding", "amd_mfma_encoding", [MmaEncodingTrait]> {
+  let mnemonic = "amd_mfma";
 
   let description = [{
-An encoding for tensors that have been produced by MI100 && MI200 tensor cores.
-It is characterized by parameters `warpsPerCTA` and `nonKDim` that indicates how data should be partitioned
-between waves (analogous to the term 'warp' used in NVIDIA's CUDA programming model).
+An encoding for tensors that have been produced by tensor cores of AMD MI GPUs.
+It is characterized by the following parameters:
+- `versionMajor` and `versionMinor` indicates the GPU arch
+  - 1.0: gfx908, i.e. MI100
+  - 2.0: gfx90a: i.e. MI200, MI210, MI250
+  - 3.0: gfx940, gfx941, gfx942: MI300
+- `warpsPerCTA` indicates the wave layout in the workgroup.
+- `MDim` and `NDim` indicate the dimension of the output of the mfma instruction.
+- `isTransposed` indicates the result tensor is transposed so that it can be converted to dotOperand layout
+without going to LDS. This is used in the case of chained dot (E.g. Flash-Attention kernel).
 
 Example 1:
-Suppose we have a tensor with a shape of [32, 64], warpsPerCTA set to [1, 2] and nonKDim set to 32.
+Suppose we have a tensor with a shape of [32, 64], warpsPerCTA set to [1, 2] and MDim=NDim=32.
 The data will be distributed between threads as follows:
 
                 wave 0                                 wave 1
@@ -743,7 +780,7 @@ The data will be distributed between threads as follows:
 [ 32  33  34  35 ...... 62  63 ]      [ 96  97  98  99 ...... 126  127 ]
 
 Example 2:
-Suppose we have a tensor with a shape of [16, 32], warpsPerCTA set to [1, 2] and nonKDim set to 16.
+Suppose we have a tensor with a shape of [16, 32], warpsPerCTA set to [1, 2] and MDim=NDim=16.
 The data will be distributed between threads as follows:
 
                 wave 0                                 wave 1
@@ -764,12 +801,34 @@ The data will be distributed between threads as follows:
 [ 48  49  50  51 ...... 62  63 ]      [ 112 113 114 115 ...... 126  127 ]
 [ 48  49  50  51 ...... 62  63 ]      [ 112 113 114 115 ...... 126  127 ]
 [ 48  49  50  51 ...... 62  63 ]      [ 112 113 114 115 ...... 126  127 ]
+
+Example 3:
+Suppose we have a tensor with a shape of [8, 8], warpsPerCTA set to [2, 2] and nonKDim set to 4.
+The data will be distributed between threads as follows(note that each element is duploicated in 16 threads):
+Suppose we have a tensor with a shape of [8, 8], warpsPerCTA set to [2, 2] and MDim=NDim=4.
+The data will be distributed between threads as follows(note that each element is duplicated in 16 threads):
+
+M  N ->                    wave 0                                                       wave 2
+| --------------------------/\--------------------------   ------------------------------/\------------------------------
+V [ 0,4,8...60   1,5...61     2,6...62     3,7...63    ]   [ 128,132...188  129,133...189  130,134...190  131,135...191 ]
+  [ 0,4,8...60   1,5...61     2,6...62     3,7...63    ]   [ 128,132...188  129,133...189  130,134...190  131,135...191 ]
+  [ 0,4,8...60   1,5...61     2,6...62     3,7...63    ]   [ 128,132...188  129,133...189  130,134...190  131,135...191 ]
+  [ 0,4,8...60   1,5...61     2,6...62     3,7...63    ]   [ 128,132...188  129,133...189  130,134...190  131,135...191 ]
+                           wave 1                                                       wave 3
+  --------------------------/\--------------------------   ------------------------------/\------------------------------
+  [ 64,68...124  65,69...125  66,70...126  67,71...127 ]   [ 192,196...252  193,197...253  194,198...254  195,199...255 ]
+  [ 64,68...124  65,69...125  66,70...126  67,71...127 ]   [ 192,196...252  193,197...253  194,198...254  195,199...255 ]
+  [ 64,68...124  65,69...125  66,70...126  67,71...127 ]   [ 192,196...252  193,197...253  194,198...254  195,199...255 ]
+  [ 64,68...124  65,69...125  66,70...126  67,71...127 ]   [ 192,196...252  193,197...253  194,198...254  195,199...255 ]
 }];
 
   let parameters = (
     ins
-    "unsigned":$nonKDim,
+    "unsigned": $versionMajor,
+    "unsigned": $versionMinor,
     ArrayRefParameter<"unsigned">:$warpsPerCTA__,
+    "unsigned":$MDim,
+    "unsigned":$NDim,
     "bool":$isTransposed,
     "CTALayoutAttr":$CTALayout
   );
@@ -781,9 +840,8 @@ The data will be distributed between threads as follows:
     SmallVector<unsigned> getSizePerThreadForOperands(unsigned opIdx) const;
     SmallVector<unsigned> getShapePerCTATileForDotOperands(ArrayRef<int64_t> shape, int opIdx) const;
     unsigned getTotalElemsPerThreadForOperands(ArrayRef<int64_t> shape, Type eltTy, int kWidth, int opIdx) const;
-    SmallVector<int64_t> getMFMAElemsPerInstrForOperands(int kWidth, int opIdx) const;
-    SmallVector<int64_t> getMFMARepForOperands(ArrayRef<int64_t> operandShape,
-                                      Type elemType, int kWidth, int opIdx) const;
+    SmallVector<int64_t> getMFMAInstrShapeForOperands(int kWidth, int opIdx) const;
+    SmallVector<int64_t> getMFMARepForOperands(ArrayRef<int64_t> operandShape, int kWidth, int opIdx) const;
 
 
   }];
@@ -791,6 +849,61 @@ The data will be distributed between threads as follows:
   let hasCustomAssemblyFormat = 1;
 }
 
+def AMDWmmaEncodingAttr : DistributedEncoding<"AMDWmmaEncoding", "amd_wmma_encoding", [MmaEncodingTrait]> {
+  let mnemonic = "amd_wmma";
+
+  let description = [{
+An encoding for tensors that have been produced by WMMA instructions,
+available on RDNA 3.
+A `warpsPerCTA` parameter characterizes data distribution between waves.
+An important limitation of WMMA for layout is a shape for tiles proccessed
+by a single wave. It is [16, 16].
+This encoding assumes specific access to matrix elements by threads.
+Example:
+Suppose we have a tensor with shape [32, 48], `warpsPerCTA` set to [2, 3].
+
+    wave 0 [16, 16]           wave 1 [16, 16]           wave 2 [16, 16]
+-----------/\----------   -----------/\----------   -----------/\----------
+[0   1   2  ... 14  15]   [0   1   2  ... 14  15]   [0   1   2  ... 14  15]
+[16  17  18 ... 30  31]   [16  17  18 ... 30  31]   [16  17  18 ... 30  31]
+[0   1   2  ... 14  15]   [0   1   2  ... 14  15]   [0   1   2  ... 14  15]
+[16  17  18 ... 30  31]   [16  17  18 ... 30  31]   [16  17  18 ... 30  31]
+...                       ...                       ...
+[0   1   2  ... 14  15]   [0   1   2  ... 14  15]   [0   1   2  ... 14  15]
+[16  17  18 ... 30  31]   [16  17  18 ... 30  31]   [16  17  18 ... 30  31]
+
+    wave 3 [16, 16]           wave 4 [16, 16]           wave 5 [16, 16]
+-----------/\----------   -----------/\----------   -----------/\----------
+[0   1   2  ... 14  15]   [0   1   2  ... 14  15]   [0   1   2  ... 14  15]
+[16  17  18 ... 30  31]   [16  17  18 ... 30  31]   [16  17  18 ... 30  31]
+[0   1   2  ... 14  15]   [0   1   2  ... 14  15]   [0   1   2  ... 14  15]
+[16  17  18 ... 30  31]   [16  17  18 ... 30  31]   [16  17  18 ... 30  31]
+...                       ...                       ...
+[0   1   2  ... 14  15]   [0   1   2  ... 14  15]   [0   1   2  ... 14  15]
+[16  17  18 ... 30  31]   [16  17  18 ... 30  31]   [16  17  18 ... 30  31]
+  }];
+
+  let parameters = (
+    ins
+    ArrayRefParameter<"unsigned">:$warpsPerCTA__,
+    "CTALayoutAttr":$CTALayout
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = extraDistributedDeclaration # [{
+    bool supportReduction() const {
+      return true;
+    }
+    SmallVector<unsigned> getSizePerThreadForOperands(unsigned opIdx) const;
+    SmallVector<unsigned> getShapePerCTATileForDotOperands(ArrayRef<int64_t> shape, int opIdx) const;
+    unsigned getTotalElemsPerThreadForOperands(ArrayRef<int64_t> shape, Type eltTy, int kWidth, int opIdx) const;
+    SmallVector<int64_t> getWMMAElemsPerInstrForOperands() const;
+    SmallVector<int64_t> getWMMARepForOperands(ArrayRef<int64_t> operandShape,
+                                      Type elemType, int kWidth, int opIdx) const;
+    static SmallVector<unsigned> getMNKDimPerWMMAInstr();
+  }];
+}
 
 def NvidiaMmaEncodingAttr : DistributedEncoding<"NvidiaMmaEncoding", "nvidia_mma_encoding", [MmaEncodingTrait]> {
   let mnemonic = "nvidia_mma";

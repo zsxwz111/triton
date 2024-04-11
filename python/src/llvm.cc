@@ -22,6 +22,7 @@
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <stdexcept>
 
 namespace py = pybind11;
 
@@ -116,6 +117,20 @@ void init_triton_llvm(py::module &&m) {
           },
           py::keep_alive<0, 1>());
 
+  // Module Flag behavior. See
+  // https://llvm.org/doxygen/classllvm_1_1Module.html#a0a5c55e12c97b80021330fe82b642293
+  // for details.
+  py::class_<llvm::Module::ModFlagBehavior>(m, "module_flag_behavior",
+                                            py::module_local());
+  m.attr("MODULE_FLAG_BEHAVIOR_ERROR") = llvm::Module::Error;
+  m.attr("MODULE_FLAG_BEHAVIOR_WARNING") = llvm::Module::Warning;
+  m.attr("MODULE_FLAG_BEHAVIOR_REQUIRE") = llvm::Module::Require;
+  m.attr("MODULE_FLAG_BEHAVIOR_OVERRIDE") = llvm::Module::Override;
+  m.attr("MODULE_FLAG_BEHAVIOR_APPEND") = llvm::Module::Append;
+  m.attr("MODULE_FLAG_BEHAVIOR_APPEND_UNIQUE") = llvm::Module::AppendUnique;
+  m.attr("MODULE_FLAG_BEHAVIOR_MAX") = llvm::Module::Max;
+  m.attr("MODULE_FLAG_BEHAVIOR_MIN") = llvm::Module::Min;
+
   py::class_<llvm::Module>(m, "module", py::module_local())
       .def(
           "__str__",
@@ -131,7 +146,12 @@ void init_triton_llvm(py::module &&m) {
           [](llvm::Module *mod) -> llvm::Module::FunctionListType & {
             return mod->getFunctionList();
           },
-          ret::reference_internal);
+          ret::reference_internal)
+      .def("add_flag",
+           [](llvm::Module *mod, llvm::Module::ModFlagBehavior behavior,
+              std::string &key, uint32_t value) {
+             return mod->addModuleFlag(behavior, key, value);
+           });
 
   py::class_<llvm::Function>(m, "function", py::module_local())
       .def("set_calling_conv", &llvm::Function::setCallingConv)
@@ -146,12 +166,12 @@ void init_triton_llvm(py::module &&m) {
   // optimization levels
   py::class_<llvm::OptimizationLevel>(m, "optimization_level",
                                       py::module_local());
-  m.attr("OPTIMIZE_O0") = (llvm::OptimizationLevel::O0);
-  m.attr("OPTIMIZE_O1") = (llvm::OptimizationLevel::O1);
-  m.attr("OPTIMIZE_O2") = (llvm::OptimizationLevel::O2);
-  m.attr("OPTIMIZE_O3") = (llvm::OptimizationLevel::O3);
-  m.attr("OPTIMIZE_Os") = (llvm::OptimizationLevel::Os);
-  m.attr("OPTIMIZE_Oz") = (llvm::OptimizationLevel::Oz);
+  m.attr("OPTIMIZE_O0") = llvm::OptimizationLevel::O0;
+  m.attr("OPTIMIZE_O1") = llvm::OptimizationLevel::O1;
+  m.attr("OPTIMIZE_O2") = llvm::OptimizationLevel::O2;
+  m.attr("OPTIMIZE_O3") = llvm::OptimizationLevel::O3;
+  m.attr("OPTIMIZE_Os") = llvm::OptimizationLevel::Os;
+  m.attr("OPTIMIZE_Oz") = llvm::OptimizationLevel::Oz;
 
   m.def(
       "to_module",
@@ -175,14 +195,14 @@ void init_triton_llvm(py::module &&m) {
     StandardInstrumentations standardInstr(mod->getContext(),
                                            /*DebugLogging*/ true);
     if (mlir::triton::tools::getBoolEnv("LLVM_IR_ENABLE_DUMP")) {
-      standardInstr.registerCallbacks(passInstrCb, &mam);
-      instrCbPtr = &passInstrCb;
       auto optMap = llvm::cl::getRegisteredOptions();
       auto optIt = optMap.find("print-after-all");
       if (optIt != optMap.end()) {
         auto optPtr = static_cast<llvm::cl::opt<bool> *>(optIt->second);
         *optPtr = true;
       }
+      standardInstr.registerCallbacks(passInstrCb, &mam);
+      instrCbPtr = &passInstrCb;
     }
 
     PipelineTuningOptions tuningOptions;
@@ -224,21 +244,25 @@ void init_triton_llvm(py::module &&m) {
       [](std::string llvmIR, std::string triple, std::string proc,
          std::string features, std::vector<std::string> flags,
          bool enable_fp_fusion, bool isObject) -> py::object {
-        py::gil_scoped_release allow_threads;
-        // create LLVM module from C++
-        llvm::LLVMContext context;
-        std::unique_ptr<llvm::MemoryBuffer> buffer =
-            llvm::MemoryBuffer::getMemBuffer(llvmIR.c_str());
-        llvm::SMDiagnostic error;
-        std::unique_ptr<llvm::Module> module =
-            llvm::parseIR(buffer->getMemBufferRef(), error, context);
-        if (!module) {
-          llvm::report_fatal_error(
-              "failed to parse IR: " + error.getMessage() +
-              "lineno: " + std::to_string(error.getLineNo()));
+        std::string obj;
+        {
+          // when allow_threads goes out of scope, gil will be released
+          py::gil_scoped_release allow_threads;
+          // create LLVM module from C++
+          llvm::LLVMContext context;
+          std::unique_ptr<llvm::MemoryBuffer> buffer =
+              llvm::MemoryBuffer::getMemBuffer(llvmIR.c_str());
+          llvm::SMDiagnostic error;
+          std::unique_ptr<llvm::Module> module =
+              llvm::parseIR(buffer->getMemBufferRef(), error, context);
+          if (!module) {
+            llvm::report_fatal_error(
+                "failed to parse IR: " + error.getMessage() +
+                "lineno: " + std::to_string(error.getLineNo()));
+          }
+          obj = translateLLVMIRToASM(*module, triple, proc, features, flags,
+                                     enable_fp_fusion, isObject);
         }
-        std::string obj = translateLLVMIRToASM(
-            *module, triple, proc, features, flags, enable_fp_fusion, isObject);
         if (isObject)
           return py::bytes(obj);
         else
@@ -257,20 +281,27 @@ void init_triton_llvm(py::module &&m) {
     });
   });
 
-  m.def("link_extern_lib", [](llvm::Module *mod, std::string path) {
-    llvm::SMDiagnostic err;
-    auto &ctx = mod->getContext();
-    auto extMod = llvm::parseIRFile(path, err, ctx);
-    if (!extMod) {
-      llvm::errs() << "Failed to load " << path;
+  m.def("link_extern_libs", [](llvm::Module *dstMod,
+                               const std::vector<std::string> &paths) {
+    if (paths.empty())
       return;
-    }
-    extMod->setTargetTriple(mod->getTargetTriple());
-    extMod->setDataLayout(mod->getDataLayout());
-    if (llvm::Linker::linkModules(*mod, std::move(extMod),
-                                  llvm::Linker::Flags::LinkOnlyNeeded)) {
-      llvm::errs() << "Failed to link " << path;
-      return;
+
+    LLVMContext &ctx = dstMod->getContext();
+    llvm::Linker linker(*dstMod);
+    for (const std::string &path : paths) {
+      llvm::SMDiagnostic err;
+      std::unique_ptr<llvm::Module> libMod = llvm::parseIRFile(path, err, ctx);
+      if (!libMod) {
+        std::string message = "Failed to parse library at " + path;
+        throw std::invalid_argument(message);
+      }
+      libMod->setTargetTriple(dstMod->getTargetTriple());
+      libMod->setDataLayout(dstMod->getDataLayout());
+      if (linker.linkInModule(std::move(libMod),
+                              llvm::Linker::Flags::LinkOnlyNeeded)) {
+        std::string message = "Failed to link library at " + path;
+        throw std::invalid_argument(message);
+      }
     }
   });
 }

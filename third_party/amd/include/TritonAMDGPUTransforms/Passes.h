@@ -6,16 +6,15 @@
 
 namespace mlir {
 
-std::unique_ptr<Pass> createTritonAMDGPUPipelinePass(int numStages = 3,
-                                                  int numWarps = 4,
-                                                  int numCTAs = 1,
-                                                  int computeCapability = 80);
+std::unique_ptr<Pass>
+createTritonAMDGPUPipelinePass(int numStages = 3, int numWarps = 4,
+                               int numCTAs = 1, int computeCapability = 80);
 
 std::unique_ptr<Pass> createTritonAMDGPUStreamPipelinePass();
 
 std::unique_ptr<Pass>
-createTritonAMDGPUAccelerateMatmulPass(int matrixCoreVersion=0,
-                                       int matrixInstructionSize=0);
+createTritonAMDGPUAccelerateMatmulPass(std::string archGenName = std::string(),
+                                       int matrixInstructionSize = 0);
 
 std::unique_ptr<Pass> createTritonAMDGPUPrefetchPass();
 
@@ -24,8 +23,6 @@ std::unique_ptr<Pass> createTritonAMDGPUCanonicalizeLoopsPass();
 std::unique_ptr<Pass> createTritonAMDGPUCoalescePass();
 
 std::unique_ptr<Pass> createTritonAMDGPUReorderInstructionsPass();
-
-std::unique_ptr<Pass> createTritonAMDGPUDecomposeConversionsPass();
 
 std::unique_ptr<Pass> createTritonAMDGPURemoveLayoutConversionsPass();
 

@@ -28,6 +28,7 @@ include "triton/Dialect/TritonNvidiaGPU/IR/TritonNvidiaGPUAttrDefs.td"
 include "mlir/Dialect/Arith/IR/ArithBase.td"
 include "triton/Dialect/Triton/IR/TritonTypes.td"
 include "triton/Dialect/Triton/IR/TritonAttrDefs.td"
+include "triton/Dialect/Triton/IR/TritonTypeInterfaces.td"
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/SideEffectInterfaces.td" // Pure
 include "mlir/Interfaces/InferTypeOpInterface.td" // SameOperandsAndResultType
@@ -36,10 +37,6 @@ include "mlir/Interfaces/ViewLikeInterface.td"
 
 def GlobalMemory : Resource<"::mlir::triton::GlobalMemory">;
 def SharedMemory : Resource<"::mlir::triton::gpu::SharedMemory">;
-
-def Source1IsSharedEncoding: NativeOpTrait<"Source1IsSharedEncoding">;
-
-def ResultsAreSharedEncoding: NativeOpTrait<"ResultsAreSharedEncoding">;
 
 class TTNG_Op<string mnemonic, list<Trait> traits = []> :
     Op<TritonNvidiaGPU_Dialect, mnemonic,
@@ -88,13 +85,13 @@ def TTNG_DotAsyncOp : TTNG_Op<"dot_async", [Pure,
     let summary = "dot async";
 
     let description = [{
-        $d = matrix_multiply($a, $b) + $c
+        $d = matrix_multiply($a, $b) + $c. For docs on InputPrecisionAttr, see TT_DotOp
     }];
 
-    let arguments = (ins TT_FpIntTensor:$a,
-                         TT_FpIntTensor:$b,
+    let arguments = (ins TT_TensorOrMemDesc:$a,
+                         TT_TensorOrMemDesc:$b,
                          TT_FpIntTensor:$c,
-                         BoolAttr:$allowTF32,
+                         TT_InputPrecisionAttr:$inputPrecision,
                          I32Attr:$maxNumImpreciseAcc);
 
     let results = (outs TT_FpIntTensor:$d);
@@ -105,11 +102,14 @@ def TTNG_DotAsyncOp : TTNG_Op<"dot_async", [Pure,
 def TTNG_DotWaitOp : TTNG_Op<"dot_wait", [DeclareOpInterfaceMethods<InferTypeOpInterface>,
                                           AllTypesMatch<["inputs", "outputs"]>]> {
   let summary = "dot wait";
-  let arguments = (ins Variadic<TT_FpIntTensor>:$inputs, I32Attr:$pendings);
-  let results = (outs Variadic<TT_FpIntTensor>:$outputs);
+  let arguments = (ins Variadic<TT_TensorOrMemDesc>:$inputs, I32Attr:$pendings);
+  let results = (outs Variadic<TT_TensorOrMemDesc>:$outputs);
   let description = [{
-    This operation defining the waiting action for a async dot, MMAv3 .e.g.
-    The subsequent operations should not execute until this operation completes waiting.
+    Waits until there are $pendings or fewer outstanding async dot operations.
+
+    $inputs must be the tensors corresponding to the async dot ops that we're
+    waiting on.  For example, if there are N pending async dot ops and we call
+    `dot_wait 1`, then $inputs must be the result of the first dot op.
   }];
 
   let assemblyFormat = "$inputs attr-dict `:` type($inputs)";

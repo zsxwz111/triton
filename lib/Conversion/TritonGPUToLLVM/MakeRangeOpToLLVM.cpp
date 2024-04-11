@@ -1,29 +1,25 @@
-#include "PatternTritonGPUOpToLLVM.h"
-#include "Utility.h"
+#include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 namespace {
 
 using namespace mlir;
 using namespace mlir::triton;
-
 struct MakeRangeOpConversion
     : public ConvertOpToLLVMPattern<triton::MakeRangeOp> {
-
   MakeRangeOpConversion(LLVMTypeConverter &converter, PatternBenefit benefit)
       : ConvertOpToLLVMPattern<triton::MakeRangeOp>(converter, benefit) {}
-
   LogicalResult
   matchAndRewrite(triton::MakeRangeOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
-    auto rankedTy = op.getResult().getType().cast<RankedTensorType>();
-    auto shape = rankedTy.getShape();
-    auto layout = rankedTy.getEncoding();
-
-    auto elemTy = rankedTy.getElementType();
+    RankedTensorType ty = op.getType();
+    auto shape = ty.getShape();
+    auto layout = ty.getEncoding();
+    auto elemTy = ty.getElementType();
     assert(elemTy.isInteger(32));
     Value start = createIndexAttrConstant(rewriter, loc, elemTy, op.getStart());
-    auto idxs = emitIndices(loc, rewriter, layout, rankedTy, true);
+    auto idxs = emitIndices(loc, rewriter, layout, ty, true);
     unsigned elems = idxs.size();
     SmallVector<Value> retVals(elems);
     // TODO: slice layout has more elements than expected.
@@ -34,8 +30,7 @@ struct MakeRangeOpConversion
       retVals[multiDim.index()] = add(multiDim.value()[0], start);
     }
     auto typeConverter = getTypeConverter();
-    Value result =
-        packLLElements(loc, typeConverter, retVals, rewriter, rankedTy);
+    Value result = packLLElements(loc, typeConverter, retVals, rewriter, ty);
     rewriter.replaceOp(op, result);
     return success();
   }

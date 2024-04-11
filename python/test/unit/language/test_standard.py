@@ -3,7 +3,7 @@ import pytest
 import torch
 import triton.language as tl
 
-from test_core import _test_binary, int_dtypes, uint_dtypes, float_dtypes, is_hip, numpy_random
+from test_core import _test_binary, int_dtypes, uint_dtypes, float_dtypes, numpy_random
 
 # ---------------
 # test maximum/minimum ops
@@ -11,6 +11,7 @@ from test_core import _test_binary, int_dtypes, uint_dtypes, float_dtypes, is_hi
 
 
 # TODO: Tests with unsigned integers failed at compilation stage.
+@pytest.mark.interpreter
 @pytest.mark.parametrize("dtype", int_dtypes + uint_dtypes + float_dtypes + ["bfloat16"])
 @pytest.mark.parametrize("op", ["maximum", "minimum"])
 def test_maximum_minium(dtype, op):
@@ -24,14 +25,11 @@ def test_maximum_minium(dtype, op):
 # ---------------
 
 
+@pytest.mark.interpreter
 @pytest.mark.parametrize("M, N", [[1, 512], [8, 64], [256, 16], [512, 8]])
 @pytest.mark.parametrize("descending", [False, True])
 @pytest.mark.parametrize("dtype_str", ['int32', 'float16', 'float32'])
 def test_sort(M, N, descending, dtype_str, device):
-    if is_hip():
-        pytest.skip(
-            'test_propagate_nan for HIP currently broken in https://github.com/openai/triton. Use https://github.com/ROCmSoftwarePlatform/triton'
-        )
 
     @triton.jit
     def sort_kernel(X, Z, N: tl.constexpr, M: tl.constexpr, descending: tl.constexpr):
@@ -55,6 +53,7 @@ def test_sort(M, N, descending, dtype_str, device):
 # ---------------
 
 
+@pytest.mark.interpreter
 @pytest.mark.parametrize("M, N", [[1, 512], [8, 64], [256, 16], [512, 8]])
 @pytest.mark.parametrize("dtype_str", ['int32', 'float16', 'float32'])
 def test_flip(M, N, dtype_str, device):

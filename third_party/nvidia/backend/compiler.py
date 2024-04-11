@@ -250,6 +250,8 @@ class CUDABackend(BaseBackend):
             fsrc.flush()
             fbin = fsrc.name + '.o'
 
+        # In order to avoid files being occupied under Windows, we read and write temporary files outside the temporary file scope.
+        if os.path.exists(fsrc.name):
             line_info = '' if os.environ.get('TRITON_DISABLE_LINE_INFO') else ' -lineinfo'
             fmad = '' if opt.enable_fp_fusion else ' --fmad=false'
             suffix = 'a ' if capability == 90 else ' '

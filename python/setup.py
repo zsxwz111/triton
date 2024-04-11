@@ -407,7 +407,8 @@ download_and_copy(
     f"https://anaconda.org/nvidia/cuda-nvdisasm/{version}/download/{system}-{arch}/cuda-nvdisasm-{version}-0.tar.bz2",
 )
 
-backends = [*BackendInstaller.copy(["nvidia"] if os.name == "nt" else ["nvidia", "amd"]), *BackendInstaller.copy_externals()]
+backends = ["nvidia"] if os.name == "nt" else ["nvidia", "amd"]
+backends = [*BackendInstaller.copy(backends), *BackendInstaller.copy_externals()]
 
 
 def add_link_to_backends():

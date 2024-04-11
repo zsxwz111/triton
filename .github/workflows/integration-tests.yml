@@ -322,7 +322,7 @@ jobs:
           mkdir -p ~/.triton
           ls -alh ~/.triton
           du -sh ~/.triton/**
-      
+
       - name: Upload Build artifacts
         if: matrix.runner[0] != 'self-hosted'
         uses: actions/upload-artifact@v3

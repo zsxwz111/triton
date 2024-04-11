@@ -200,6 +200,9 @@ jobs:
             echo "CXX=clang++" >> "${GITHUB_ENV}"
           fi
 
+          # patch LLVM header for naming conflict
+          sed -i 's|detail::|mlir::detail::|g' LLVM/include/mlir/IR/Matchers.h
+
       - name: CUDA Setup ${{ matrix.cuda-version }}
         if: matrix.runner[0] != 'self-hosted'
         shell: bash -el {0}

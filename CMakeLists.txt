@@ -297,4 +297,6 @@ endif()
 
 add_subdirectory(bin)
 add_subdirectory(test)
-add_subdirectory(unittest)
+if(NOT WIN32) # not to build test for windows
+  add_subdirectory(unittest)
+endif()

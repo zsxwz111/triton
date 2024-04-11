@@ -8,6 +8,7 @@ permissions: read-all
 
 jobs:
   Build-Documentation:
+    if: github.repository == 'openai/triton'
     runs-on: [self-hosted, A100]
     timeout-minutes: 30
 

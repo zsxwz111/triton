@@ -255,7 +255,7 @@ jobs:
         if: matrix.runner != 'windows-latest'
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install wheel cmake==3.24 ninja pytest-xdist lit wheel
+          python3 -m pip install wheel cmake==3.24 ninja pytest-xdist lit setuptools
 
       - name: Install Triton
         if: matrix.runner != 'windows-latest'
@@ -272,7 +272,7 @@ jobs:
         run: |
           cd python
           python -m pip install --upgrade pip
-          python -m pip install cmake==3.24 ninja pytest-xdist wheel
+          python -m pip install wheel cmake==3.24 ninja pytest-xdist setuptools
           python -m pip install --no-build-isolation -vvv .
           python setup.py bdist_wheel
 

@@ -73,7 +73,7 @@ jobs:
             echo '::set-output name=matrix-HIP::["ubuntu-latest", "windows-latest"]'
           fi
           echo '::set-output name=python-version::["3.8", "3.9", "3.10", "3.11", "3.12"]'
-          echo '::set-output name=cuda-version::["11.8.89", "12.1.1"]'
+          echo '::set-output name=cuda-version::["11.8.89", "12.4.1"]'
           echo '::set-output name=cc::["clang"]'
 
   pre-commit:
